@@ -1,7 +1,7 @@
 /*
 
 Me and my Son's version of Ready Steady Bang!
-We call it RSB5001
+We call it RSB5001 x
 
 more documentation coming soon......
 
