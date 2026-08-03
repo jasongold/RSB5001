@@ -225,7 +225,11 @@ void check_buttons() {
         buttonState[i] = reading;
         if (buttonState[i] == BUTTON_PRESSED) {
           buttonIsPressed[i] = true;   // set your flag for the adjustment function
-          buttonPressTime[i] = now;    // remember exactly when, so ties are fair
+          // lastDebounceTime is when the button physically went down, which is
+          // debounceDelay ago. Using it instead of now means the reaction time
+          // we report doesn't include the time spent debouncing, and ties are
+          // settled on when people actually pressed.
+          buttonPressTime[i] = lastDebounceTime[i];
         }
       }
     }
