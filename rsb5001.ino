@@ -19,114 +19,151 @@ Ideas for future additions:
 // Creates an LCD object. Parameters: (rs, enable, d4, d5, d6, d7)
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 
-// Setup variables for the buttons and LEDs
-// using const because they will never change
-const int p1Button = 22;
-const int p1BlueLed = 23;
-const int p1RedLed = 24;
 
-const int p2Button = 25;
-const int p2BlueLed = 26;
-const int p2RedLed = 27;
+// ---------------------------------------------------------------------------
+// Wiring
+// ---------------------------------------------------------------------------
 
-const int p3Button = 28;
-const int p3BlueLed = 29;
-const int p3RedLed = 30;
+// Everything is kept in arrays now instead of p1/p2/p3/p4 copies of each
+// variable. Player 1 is index 0, player 2 is index 1, and so on. Adding a
+// fifth player is now just a matter of adding their pins to these lists.
+const int NUM_PLAYERS = 4;
 
-const int p4Button = 31;
-const int p4BlueLed = 32;
-const int p4RedLed = 33;
+const int blueLed[NUM_PLAYERS] = {23, 26, 29, 32};
+const int redLed[NUM_PLAYERS]  = {24, 27, 30, 33};
 
-const int startButton = 34;
+// The buttons: the players first, then the start button on the end.
+const byte buttons[] = {22, 25, 28, 31, 34};
+const int NUMBUTTONS = sizeof(buttons) / sizeof(buttons[0]);
+const int START_BUTTON = NUM_PLAYERS;  // the last entry in buttons[]
 
-const int statusRGB_B = 46;
-const int statusRGB_G = 45;
 const int statusRGB_R = 44;
+const int statusRGB_G = 45;
+const int statusRGB_B = 46;
+
+const int buzzer = 7;             // buzzer to arduino pin 7
+
+const int lcdContrastPin = 10;    // instead of a potentiometer
+const int lcdContrast = 75;
+
+const int randomSeedPin = A0;     // MUST be left unconnected - see setup()
+
+// How the buttons are wired.
+//   0 = buttons go to +5V and the board has pull-down resistors (how it is now)
+//   1 = buttons go to GND and we use the Arduino's own pull-up resistors
+// Only change this if you rewire the box, otherwise every button will read
+// as permanently pressed.
+#define USE_INTERNAL_PULLUPS 0
+
+#if USE_INTERNAL_PULLUPS
+  const int BUTTON_MODE     = INPUT_PULLUP;
+  const int BUTTON_PRESSED  = LOW;
+  const int BUTTON_RELEASED = HIGH;
+#else
+  const int BUTTON_MODE     = INPUT;
+  const int BUTTON_PRESSED  = HIGH;
+  const int BUTTON_RELEASED = LOW;
+#endif
 
 
-const int buzzer = 7; //buzzer to arduino pin 7
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
 
-// settings
-const int timeMin = 100;  // minimum time on "BANG"
-const int timeMax = 4000;  // maximum time on "BANG"
-const unsigned long bangAllDead = 3000;  // everyone died...nobody shot. this is the time after bang to wait for button presses
+const unsigned long timeMin = 100;         // minimum time on "BANG"
+const unsigned long timeMax = 4000;        // maximum time on "BANG"
+const unsigned long readyTime = 1000;      // how long "Ready" stays up
+const unsigned long bangAllDead = 3000;    // everyone died...nobody shot. this is the time after bang to wait for button presses
+const unsigned long drawWindow = 2;        // shots this close together (ms) count as a draw
 
+// Buzzer notes
+const int toneReadySteady = 3520;
+const int toneBang = 4699;
+const int toneDead = 1760;
+const int toneLength = 50;
 
-// variables that will change
-int long ranDelay; // random delay for the time for BANG
-int realTime;  //time it took to push button after bang
-unsigned long steadyStart; // when did it say steady?
-unsigned long bangStart;  // when did it say bang?
-unsigned long bangEnd;  // when was button pushed to shoot?
-unsigned long startWait; // start of wait time
-unsigned long shootDelayWait = 0; // how long to wait before end of ready and steady - set each time
-int gameMode = 0; // 0 is ready & 1 is steady, and 2 is bang
-int p1Score = 0;
-int p2Score = 0;
-int p3Score = 0;
-int p4Score = 0;
-
-// variables that need to be reset for each game (same ones should be below as well)
-int gameStarted = 0;  // is there a game happening?
-int p1ButtonPressed = 0; // button not pressed
-int p2ButtonPressed = 0; // button not pressed
-int p3ButtonPressed = 0; // button not pressed
-int p4ButtonPressed = 0; // button not pressed
-int startButtonPressed = 0; // button not pressed
-int deadPlayer = 0; // did someone die by shooting too soon?
-int alivePlayer = 0;  // who lived??
-int gameEnded = 0; // the game is not over
-int p1alive = 1;  // player is alive
-int p2alive = 1;  // player is alive
-int p3alive = 1;  // player is alive
-int p4alive = 1;  // player is alive
+// Game modes
+const int MODE_READY = 0;
+const int MODE_STEADY = 1;
+const int MODE_BANG = 2;
 
 
-// debounce code to stop bad reads of the buttons
+// ---------------------------------------------------------------------------
+// Variables that change while we play
+// ---------------------------------------------------------------------------
+
+int gameMode = MODE_READY;
+bool gameStarted = false;
+
+bool alive[NUM_PLAYERS];
+int score[NUM_PLAYERS];          // survives between games, only reset on power up
+
+int winner;                      // -1 means nobody has shot yet
+int drawPartner;                 // the other player when it is too close to call
+bool isDraw;
+
+unsigned long ranDelay;          // random delay for the time for BANG
+unsigned long bangStart;         // when did it say bang?
+unsigned long bangEnd;           // exactly when was the winning button pushed?
+unsigned long realTime;          // time it took to push button after bang
+
+
+// Buttons waiting to be dealt with
+bool playerShot[NUM_PLAYERS];
+unsigned long playerShotTime[NUM_PLAYERS];
+bool startPressed = false;
+
+
+// ---------------------------------------------------------------------------
+// Debounce code to stop bad reads of the buttons
 // adapted from https://forum.arduino.cc/t/debouncing-multiple-buttons-with-arrays-sample-for-review/499457
-byte buttons[] = {p1Button, p2Button, p3Button, p4Button, startButton}; // pin numbers of the buttons that we'll use
-#define NUMBUTTONS sizeof(buttons)
+//
+// Each button now gets its OWN debounce timer. When they all shared one, any
+// button twitching would restart the wait for every other button too - so two
+// players shooting at nearly the same moment interfered with each other, and
+// drumming on a button could stop anything registering at all.
+// ---------------------------------------------------------------------------
+
 int buttonState[NUMBUTTONS];
 int lastButtonState[NUMBUTTONS];
-boolean buttonIsPressed[NUMBUTTONS];
-// the following variables are unsigned longs because the time, measured in
-// milliseconds, will quickly become a bigger number than can be stored in an int.
-long lastDebounceTime = 0; // the last time the output pin was toggled
-long debounceDelay = 50; // the debounce time; increase if the output flickers
-// end debounce code
-
+bool buttonIsPressed[NUMBUTTONS];
+unsigned long buttonPressTime[NUMBUTTONS];   // when it actually went down
+unsigned long lastDebounceTime[NUMBUTTONS];  // one per button
+const unsigned long debounceDelay = 10;      // the debounce time; increase if the output flickers
 
 
 void setup() {
-  // debounce code
   Serial.begin(9600);
-  // define pins:
-  for (int i=0; i<(NUMBUTTONS-1); i++) {
-    pinMode(i, INPUT);
-    lastButtonState[i]=LOW;
-    buttonIsPressed[i]=false;
+
+  // Set up the buttons. This used to say pinMode(i, ...) which configured
+  // pins 0-3 (the serial pins and two of the LCD pins) instead of the
+  // actual buttons.
+  for (int i = 0; i < NUMBUTTONS; i++) {
+    pinMode(buttons[i], BUTTON_MODE);
+    buttonState[i] = BUTTON_RELEASED;
+    lastButtonState[i] = BUTTON_RELEASED;
+    buttonIsPressed[i] = false;
+    lastDebounceTime[i] = 0;
   }
 
-  pinMode(10, OUTPUT);
-  int Contrast=75;
-  analogWrite(10, Contrast);
-  // For LCD for contrast (instead of pent)
+  // Without this the "random" delay before BANG is the exact same sequence
+  // every single time the box is switched on, so you can learn the timings.
+  // analogRead on an unconnected pin picks up electrical noise to seed it.
+  randomSeed(analogRead(randomSeedPin));
 
+  // For LCD for contrast (instead of pent)
+  pinMode(lcdContrastPin, OUTPUT);
+  analogWrite(lcdContrastPin, lcdContrast);
 
   // set up the LCD's number of columns and rows:
   lcd.begin(16, 2);
-  // Clears the LCD screen
   lcd.clear();
 
   // initialize LEDs as outputs
-  pinMode(p1BlueLed, OUTPUT);
-  pinMode(p1RedLed, OUTPUT);
-  pinMode(p2BlueLed, OUTPUT);
-  pinMode(p2RedLed, OUTPUT);
-  pinMode(p3BlueLed, OUTPUT);
-  pinMode(p3RedLed, OUTPUT);
-  pinMode(p4BlueLed, OUTPUT);
-  pinMode(p4RedLed, OUTPUT);
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    pinMode(blueLed[i], OUTPUT);
+    pinMode(redLed[i], OUTPUT);
+  }
   pinMode(statusRGB_R, OUTPUT);
   pinMode(statusRGB_G, OUTPUT);
   pinMode(statusRGB_B, OUTPUT);
@@ -134,16 +171,12 @@ void setup() {
   // buzzer
   pinMode(buzzer, OUTPUT); // Set buzzer as an output
 
-  // initalize buttons as inputs
-  pinMode(p1Button, INPUT);
-  pinMode(p2Button, INPUT);
-  pinMode(p3Button, INPUT);
-  pinMode(p4Button, INPUT);
-  pinMode(startButton, INPUT);
+  resetGame();
+  lampTest();     // flash every LED once so you can see they all still work
+  updateLeds();
+  setStatusColour(0, 0, 255);
 
   // initial start screen
-  lcd.begin(16, 2);
-  lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Press the blue");
   lcd.setCursor(0, 1);
@@ -152,349 +185,343 @@ void setup() {
 
 
 void loop() {
-  analogWrite(statusRGB_R, 0);
-  analogWrite(statusRGB_G, 0);
-  analogWrite(statusRGB_B, 255);
-
   check_buttons();
   action();
-  if (gameStarted == 1){
-    startGame();
+
+  if (gameStarted) {
+    playRound();
+  } else if (startPressed) {
+    startPressed = false;
+    gameStarted = true;
   }
 
-  //turn LEDs on (nice to see they all work)
-  digitalWrite (p1BlueLed, HIGH);
-  digitalWrite (p1RedLed, HIGH);
-  digitalWrite (p2BlueLed, HIGH);
-  digitalWrite (p2RedLed, HIGH);
-  digitalWrite (p3BlueLed, HIGH);
-  digitalWrite (p3RedLed, HIGH);
-  digitalWrite (p4BlueLed, HIGH);
-  digitalWrite (p4RedLed, HIGH);
+  // Note: the LEDs are deliberately NOT written here any more. This used to
+  // force all eight of them on every time round the loop, which wiped out the
+  // who-won-and-who-died display the moment a game finished.
 }
 
 
-//debounce code
+// ---------------------------------------------------------------------------
+// Reading the buttons
+// ---------------------------------------------------------------------------
+
 void check_buttons() {
-  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
+  unsigned long now = millis();
+
+  for (int i = 0; i < NUMBUTTONS; i++) {
     // read the state of the switch into a local variable:
-    int reading = digitalRead(buttons[currentButton]); // check to see if you just pressed the button and you've waited long enough since the last press to ignore any noise:
-    // If the switch changed, due to noise or pressing then reset the debouncing timer
-    if (reading != lastButtonState[currentButton]) { lastDebounceTime = millis(); }
-    // whatever the reading is at, it's been there for longer than the debounce delay, so take it as the actual current state:
-    if ((millis() - lastDebounceTime) > debounceDelay) {
-      // if the button state has changed:
-      if (reading != buttonState[currentButton]) {
-        buttonState[currentButton] = reading;
-        if (buttonState[currentButton]==HIGH) { //pushing down on the button
-          buttonIsPressed[currentButton]=true; // set your flag for the adjustment function
+    int reading = digitalRead(buttons[i]);
+
+    // If the switch changed, due to noise or pressing then reset this
+    // button's debouncing timer
+    if (reading != lastButtonState[i]) {
+      lastDebounceTime[i] = now;
+    }
+
+    // whatever the reading is at, it's been there for longer than the debounce
+    // delay, so take it as the actual current state:
+    if ((now - lastDebounceTime[i]) > debounceDelay) {
+      if (reading != buttonState[i]) {
+        buttonState[i] = reading;
+        if (buttonState[i] == BUTTON_PRESSED) {
+          buttonIsPressed[i] = true;   // set your flag for the adjustment function
+          // lastDebounceTime is when the button physically went down, which is
+          // debounceDelay ago. Using it instead of now means the reaction time
+          // we report doesn't include the time spent debouncing, and ties are
+          // settled on when people actually pressed.
+          buttonPressTime[i] = lastDebounceTime[i];
         }
       }
     }
-    // save the reading.  Next time through the loop, it'll be the lastButtonState:
-    lastButtonState[currentButton] = reading;
+
+    // save the reading. Next time through the loop, it'll be the lastButtonState:
+    lastButtonState[i] = reading;
   }
 }
 
-//debounce code
+
 void action() {
-  //lcd.setCursor(0, 1);
-  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
-    if (buttonIsPressed[currentButton]) {
-      //Serial.print("button "); Serial.println(buttons[currentButton]);
-      if (buttons[currentButton]==startButton) { // -------- Start button
-          if (gameStarted == 0){
-            gameStarted = 1;
-          }
-          //lcd.print("Pressed start");
-          startButtonPressed = 1;
-      }
-      if ((buttons[currentButton]==p1Button) || (buttons[currentButton]==p2Button) || (buttons[currentButton]==p3Button) || (buttons[currentButton]==p4Button)){
-        if (buttons[currentButton]==p1Button) { // -------- Player 1 button
-            p1ButtonPressed = 1;
-            //lcd.print("Pressed Player 1");
-        } else if (buttons[currentButton]==p2Button) { // -------- Player 2 button
-            p2ButtonPressed = 1;
-            //lcd.print("Pressed Player 2");
-        } else if (buttons[currentButton]==p3Button) { // -------- Player 3 button
-            p3ButtonPressed = 1;
-            //lcd.print("Pressed Player 3");
-        } else if (buttons[currentButton]==p4Button) { // -------- Player 4 button
-            p4ButtonPressed = 1;
-            //lcd.print("Pressed Player 4");
-        }
-      }
-      buttonIsPressed[currentButton]=false; //reset the button
+  for (int i = 0; i < NUMBUTTONS; i++) {
+    if (!buttonIsPressed[i]) {
+      continue;
+    }
+    buttonIsPressed[i] = false;    // reset the button
+
+    if (i == START_BUTTON) {
+      startPressed = true;
+    } else {
+      playerShot[i] = true;
+      playerShotTime[i] = buttonPressTime[i];
     }
   }
 }
 
 
-void startGame(){
-  gameStarted = 1;
-  // reset the start button to 'unpressed' so we can check for it again later
-  startButtonPressed = 0;
+// ---------------------------------------------------------------------------
+// Playing a round
+// ---------------------------------------------------------------------------
+
+void playRound() {
+  startPressed = false;
+  clearShots();
 
   // now starting READY
-  gameMode = 0; // 0 is ready & 1 is steady, and 2 is bang
-
-  tone(buzzer, 3520, 50); // ready & steady
-
+  gameMode = MODE_READY;
+  tone(buzzer, toneReadySteady, toneLength); // ready & steady
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("Ready");
-
-  analogWrite(statusRGB_R, 0);
-  analogWrite(statusRGB_G, 255);
-  analogWrite(statusRGB_B, 0);
-
-  // turn off player lights
-  digitalWrite (p1BlueLed, LOW);
-  digitalWrite (p1RedLed, LOW);
-  digitalWrite (p2BlueLed, LOW);
-  digitalWrite (p2RedLed, LOW);
-  digitalWrite (p3BlueLed, LOW);
-  digitalWrite (p3RedLed, LOW);
-  digitalWrite (p4BlueLed, LOW);
-  digitalWrite (p4RedLed, LOW);
+  setStatusColour(0, 255, 0);
+  allLedsOff();
 
   // wait for a second between ready and steady - but let people kill themselves
-  shootDelayWait = millis() + 1000;
-  waitForShot();
+  waitForShot(readyTime);
 
   // Now starting STEADY
-  gameMode = 1; // 0 is ready & 1 is steady, and 2 is bang
-  tone(buzzer, 3520, 50); // ready & steady sound
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Steady");
-  // Yellow (turn red and green on):
-  analogWrite(statusRGB_R, 255 );
-  analogWrite(statusRGB_G, 160);
-  analogWrite(statusRGB_B, 0);
+  if (!everyoneDead()) {
+    gameMode = MODE_STEADY;
+    tone(buzzer, toneReadySteady, toneLength); // ready & steady sound
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Steady");
+    // Yellow (turn red and green on):
+    setStatusColour(255, 160, 0);
 
-  // random delay from steady to bang
-  // set steady start to right now
-  // wait for time to expire but also check for buttons being pushed in case someone jumps the gun
-  // if someone shoots before delay is up, they die!
-  ranDelay = random(timeMin, timeMax);
-  shootDelayWait = millis() + ranDelay;
-  waitForShot();
+    // random delay from steady to bang
+    // if someone shoots before delay is up, they die!
+    ranDelay = random(timeMin, timeMax);
+    waitForShot(ranDelay);
+  }
 
   // Now starting BANG
-  gameMode = 2; // 0 is ready & 1 is steady, and 2 is bang
-  // waiting on first player to shoot after bang!
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Bang!");
-  analogWrite(statusRGB_R, 255);
-  analogWrite(statusRGB_G, 0);
-  analogWrite(statusRGB_B, 0);
-  tone(buzzer, 4699, 50); // bang
-  lcd.setCursor(0, 1);
+  if (!everyoneDead()) {
+    gameMode = MODE_BANG;
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Bang!");
+    setStatusColour(255, 0, 0);
+    tone(buzzer, toneBang, toneLength); // bang
 
-  // let's see who shoots first!!
-  bangStart = millis();  // also used below for calculating reflex time
-  shootDelayWait = bangStart + bangAllDead;
-  waitForShot();
-
-  // check if everyone died to mark them as dead
-  if (alivePlayer == 0){
-    p1alive = 0;  // player is dead
-    p2alive = 0;  // player is dead
-    p3alive = 0;  // player is dead
-    p4alive = 0;  // player is dead
-  }
-  showAlive();  // either from all dead or from someone shooting correctly
-
-  // how long did it take?
-  realTime = millis() - bangStart;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (alivePlayer == 0){
-    lcd.print(String("Everyone dies!"));
-  } else {
-    lcd.print(String("P") + String(alivePlayer) + String(" wins! ") +String(realTime));
-  }
-  tone(buzzer, 1760, 50); // dead
-
-  // update LEDs to reflect who is alive/dead
-  showAlive();
-
-  // awards point to winner
-  if(p1alive == 1){
-    p1Score = p1Score +1;
-  }
-  if(p2alive == 1){
-    p2Score = p2Score +1;
+    // let's see who shoots first!!
+    bangStart = millis();
+    waitForShot(bangAllDead);
   }
 
-  if(p3alive == 1){
-    p3Score = p3Score +1;
-  }
-
-  if(p4alive == 1){
-    p4Score = p4Score +1;
-  }
-
-  //Serial.print(p1Score); Serial.print(" "); Serial.print(p2Score); Serial.print(" "); Serial.print(p3Score); Serial.print(" "); Serial.print(p4Score); Serial.print(" ");
-  lcd.setCursor(0, 1);
-  lcd.print(String(p1Score) + String(" ") + String(p2Score) + String(" ") + String(p3Score) + String(" ") + String(p4Score));
+  showResult();
 
   // keep showing results and wait for start button again
   waitOnStartButton();
   resetGame();
+  // gameStarted stays true, so the next round begins straight away instead of
+  // making you press the start button a second time.
 }
-
 
 
 // this waits for someone to either shoot who is alive and runs till time delay ends
 // it handles all three 'wait' periods (ready/steady/bang)
-void waitForShot(){
-  while ((millis() < shootDelayWait) && (alivePlayer == 0)){
-    //Serial.print("waitForShot:  "); Serial.print("game mode: "); Serial.print(gameMode); Serial.print(" start: "); Serial.print(millis()); Serial.print(" delaywait: "); Serial.print(shootDelayWait); Serial.print("\n");
+void waitForShot(unsigned long duration) {
+  unsigned long start = millis();
+
+  // Subtracting like this instead of comparing against millis() + duration
+  // means it still behaves when millis() wraps around after ~49 days.
+  while ((millis() - start) < duration) {
     check_buttons();
     action();
-    if ( (p1ButtonPressed == 1) || (p2ButtonPressed == 1) || (p3ButtonPressed == 1) || (p4ButtonPressed == 1)){
-      // someone pushed a button...let's see who (we track it this way cause it checks everyone at the exact same time)
-      // note below - you only can push a button if you are alive
-      if ((p1ButtonPressed == 1) && (p1alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 1;
-          p1alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 1;
-          p2alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
+    handleShots();
+
+    if (gameMode == MODE_BANG) {
+      if (winner >= 0) {
+        return;                 // we have a winner, no need to wait it out
       }
-      else if ((p2ButtonPressed == 1) && (p2alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 2;
-          p2alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 2;
-          p1alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
-      }
-      else if ((p3ButtonPressed == 1) && (p3alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 3;
-          p3alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 3;
-          p1alive = 0;  // player is dead
-          p2alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
-      }
-      else if ((p4ButtonPressed == 1) && (p4alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 4;
-          p4alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 4;
-          p1alive = 0;  // player is dead
-          p2alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-        }
-      }
+    } else if (everyoneDead()) {
+      return;                   // nobody left to shoot, get on with it
     }
   }
 }
 
 
+// Work out what the button presses we have collected actually mean.
+void handleShots() {
+  int firstPlayer = -1;
+  unsigned long firstTime = 0;
+  int secondPlayer = -1;
+  unsigned long secondTime = 0;
 
-// update LEDs to dead
-void killPlayer(){
-  if (p1alive == 0){
-    digitalWrite (p1BlueLed, LOW);
-    digitalWrite (p1RedLed, HIGH);
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    if (!playerShot[i]) {
+      continue;
+    }
+    playerShot[i] = false;
+
+    // note - you only can shoot if you are alive
+    if (!alive[i]) {
+      continue;
+    }
+
+    if (gameMode < MODE_BANG) {
+      // jumped the gun, you're dead
+      alive[i] = false;
+      tone(buzzer, toneDead, toneLength);
+      updateLeds();
+      continue;
+    }
+
+    // After BANG, sort out who was genuinely first using the times we recorded
+    // when the buttons went down. Checking p1 then p2 then p3 then p4 the way
+    // it used to meant player 1 won every close finish.
+    unsigned long t = playerShotTime[i];
+    if (firstPlayer < 0 || t < firstTime) {
+      secondPlayer = firstPlayer;
+      secondTime = firstTime;
+      firstPlayer = i;
+      firstTime = t;
+    } else if (secondPlayer < 0 || t < secondTime) {
+      secondPlayer = i;
+      secondTime = t;
+    }
   }
-  if (p2alive == 0){
-    digitalWrite (p2BlueLed, LOW);
-    digitalWrite (p2RedLed, HIGH);
-  }
-  if (p3alive == 0){
-    digitalWrite (p3BlueLed, LOW);
-    digitalWrite (p3RedLed, HIGH);
-  }
-  if (p4alive == 0){
-    digitalWrite (p4BlueLed, LOW);
-    digitalWrite (p4RedLed, HIGH);
+
+  if (firstPlayer >= 0) {
+    winner = firstPlayer;
+    bangEnd = firstTime;
+    if (secondPlayer >= 0 && (secondTime - firstTime) <= drawWindow) {
+      isDraw = true;
+      drawPartner = secondPlayer;
+    }
   }
 }
 
 
-// update LEDs to show who is alive/dead at end of game
-void showAlive(){
-  if (p1alive == 1){
-    digitalWrite (p1BlueLed, HIGH);
-    digitalWrite (p1RedLed, LOW);
+void showResult() {
+  // Work out who is left standing
+  if (winner < 0) {
+    // everyone died - either they all jumped the gun or nobody shot in time
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+      alive[i] = false;
+    }
   } else {
-    digitalWrite (p1BlueLed, LOW);
-    digitalWrite (p1RedLed, HIGH);
+    for (int i = 0; i < NUM_PLAYERS; i++) {
+      alive[i] = (i == winner) || (isDraw && i == drawPartner);
+    }
   }
-  if (p2alive == 1){
-    digitalWrite (p2BlueLed, HIGH);
-    digitalWrite (p2RedLed, LOW);
-  } else {
-    digitalWrite (p2BlueLed, LOW);
-    digitalWrite (p2RedLed, HIGH);
-  }
-  if (p3alive == 1){
-    digitalWrite (p3BlueLed, HIGH);
-    digitalWrite (p3RedLed, LOW);
-  } else {
-    digitalWrite (p3BlueLed, LOW);
-    digitalWrite (p3RedLed, HIGH);
-  }
-  if (p4alive == 1){
-    digitalWrite (p4BlueLed, HIGH);
-    digitalWrite (p4RedLed, LOW);
-  } else {
-    digitalWrite (p4BlueLed, LOW);
-    digitalWrite (p4RedLed, HIGH);
-  }
-}
 
-void resetGame(){
-  gameStarted = 0;  // is there a game happening?
-  p1ButtonPressed = 0; // button not pressed
-  p2ButtonPressed = 0; // button not pressed
-  p3ButtonPressed = 0; // button not pressed
-  p4ButtonPressed = 0; // button not pressed
-  startButtonPressed = 0; // button not pressed
-  deadPlayer = 0; // did someone die by shooting too soon?
-  alivePlayer = 0;  // who lived??
-  p1alive = 1;  // player is alive
-  p2alive = 1;  // player is alive
-  p3alive = 1;  // player is alive
-  p4alive = 1;  // player is alive
-  gameEnded = 0; // the game is not over
+  // update LEDs to reflect who is alive/dead
+  updateLeds();
+
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("New Game! Press");
-  lcd.setCursor(0, 1);
-  lcd.print("blue to start");
+  if (winner < 0) {
+    lcd.print("Everyone dies!");
+  } else if (isDraw) {
+    lcd.print("Draw! P");
+    lcd.print(winner + 1);
+    lcd.print(" & P");
+    lcd.print(drawPartner + 1);
+  } else {
+    // how long did it take? bangEnd is stamped the moment the button went
+    // down, so this no longer includes the time spent updating the LEDs.
+    realTime = bangEnd - bangStart;
+    lcd.print("P");
+    lcd.print(winner + 1);
+    lcd.print(" wins! ");
+    lcd.print(realTime);
+  }
+  tone(buzzer, toneDead, toneLength); // dead
 
-}
-
-// wait for start button to be pressed
-void waitOnStartButton(){
-  while(1){
-    check_buttons();
-    action();
-    if (startButtonPressed == 1) {
-      startButtonPressed = 0;  // unpress it again for the future
-      return;
+  // awards point to whoever is still standing
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    if (alive[i]) {
+      score[i]++;
     }
   }
+
+  lcd.setCursor(0, 1);
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    if (i > 0) {
+      lcd.print(" ");
+    }
+    lcd.print(score[i]);
+  }
+}
+
+
+// wait for start button to be pressed
+void waitOnStartButton() {
+  startPressed = false;
+  while (!startPressed) {
+    check_buttons();
+    action();
+  }
+  startPressed = false;  // unpress it again for the future
+  clearShots();          // ignore any button mashing during the results screen
+}
+
+
+void resetGame() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    alive[i] = true;     // player is alive
+  }
+  clearShots();
+  winner = -1;           // nobody has shot
+  drawPartner = -1;
+  isDraw = false;
+  realTime = 0;
+  startPressed = false;
+}
+
+
+void clearShots() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    playerShot[i] = false;
+    playerShotTime[i] = 0;
+  }
+}
+
+
+bool everyoneDead() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    if (alive[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// Lights
+// ---------------------------------------------------------------------------
+
+// show who is alive (blue) and who is dead (red)
+void updateLeds() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    digitalWrite(blueLed[i], alive[i] ? HIGH : LOW);
+    digitalWrite(redLed[i], alive[i] ? LOW : HIGH);
+  }
+}
+
+
+void allLedsOff() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    digitalWrite(blueLed[i], LOW);
+    digitalWrite(redLed[i], LOW);
+  }
+}
+
+
+// nice to see they all work
+void lampTest() {
+  for (int i = 0; i < NUM_PLAYERS; i++) {
+    digitalWrite(blueLed[i], HIGH);
+    digitalWrite(redLed[i], HIGH);
+  }
+  delay(400);
+  allLedsOff();
+}
+
+
+void setStatusColour(int r, int g, int b) {
+  analogWrite(statusRGB_R, r);
+  analogWrite(statusRGB_G, g);
+  analogWrite(statusRGB_B, b);
 }
