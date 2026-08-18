@@ -98,7 +98,20 @@ void setAllPlayerLeds(bool blue, bool red);
 // ---------------------------------------------------------------------------
 
 // Clear the display and write both lines. Pass "" for a blank line.
+// Fast — about 2 ms. Use where timing matters.
 void lcdShow(const char* line1, const char* line2);
+
+// Re-run the controller's full init sequence, then write both lines.
+//
+// Costs about 65 ms, so it is only for round boundaries, never the Steady or
+// Bang transitions.
+//
+// This exists because the display can lose 4-bit nibble sync — a glitch on the
+// enable line clocks in half a byte, and from then on every character is
+// misread. lcd.clear() cannot recover from that: it is sent over the same
+// desynced link. Only the init sequence resyncs the controller, because it is
+// designed to be understood from any state.
+void lcdShowFresh(const char* line1, const char* line2);
 
 // Rewrite one row in place, padded to 16 characters so leftovers cannot show
 // through. Row 0 is the top.

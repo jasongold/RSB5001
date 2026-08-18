@@ -140,6 +140,11 @@ void lcdShow(const char* line1, const char* line2) {
   lcd.print(line2);
 }
 
+void lcdShowFresh(const char* line1, const char* line2) {
+  lcd.begin(16, 2);  // resyncs the controller; see hardware.h
+  lcdShow(line1, line2);
+}
+
 void lcdLine(uint8_t row, const char* text) {
   lcd.setCursor(0, row);
   uint8_t written = 0;
