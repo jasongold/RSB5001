@@ -1,500 +1,416 @@
 /*
+  RSB5001 — Ready Steady Bang
 
-Me and my Son's version of Ready Steady Bang!
-We call it RSB5001 x
+  My son and I built a physical version of Ready Steady Bang on an Arduino Mega.
+  Four stations, each with a button and a blue/red LED pair; a centre
+  select button; a 16x2 LCD; an RGB status light; and a DFPlayer Mini that
+  speaks the countdown.
 
-more documentation coming soon......
+  The screen says Ready, then Steady, then — after a delay you cannot predict —
+  Bang! First to hit their button wins. Draw before the bang and you are out.
 
-Ideas for future additions:
-- Might be cool to see 2nd/3rd/4th place
-- Single player
-- Keep track of fastest time
+  Wiring, timings and feature flags all live in config.h; nothing else in the
+  sketch contains a pin number.
 
+  Structure:
+    config.h      pin map, timings, feature flags
+    hardware.*    buttons, LEDs, LCD, audio
+    game.*        players, scoring, placings, the single-player opponent
+    this file     the state machine
 
- */
+  The round is a non-blocking state machine: loop() polls the buttons, runs one
+  pass of the current state, and returns. Nothing blocks, nothing spins. The
+  earlier version ran a whole round top-to-bottom inside the start handler with
+  blocking wait loops, which is why a press meant for one screen could still be
+  sitting in a flag two screens later.
 
-// include the library code:
-#include <LiquidCrystal.h>
+  See reference/ for the earlier versions and CODE-REVIEW.md for the review that
+  prompted this rewrite.
+*/
 
-// Creates an LCD object. Parameters: (rs, enable, d4, d5, d6, d7)
-LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
+#include "config.h"
+#include "game.h"
+#include "hardware.h"
 
-// Setup variables for the buttons and LEDs
-// using const because they will never change
-const int p1Button = 22;
-const int p1BlueLed = 23;
-const int p1RedLed = 24;
+enum GameState : uint8_t {
+  ST_MENU,     // choosing a mode; waiting for a station to start the round
+  ST_READY,    // "Ready" is up
+  ST_STEADY,   // "Steady" is up; the bang is coming at an unknown moment
+  ST_BANG,     // draw!
+  ST_RESULTS,  // who won, and how fast
+  ST_SCORES    // running totals
+};
 
-const int p2Button = 25;
-const int p2BlueLed = 26;
-const int p2RedLed = 27;
+static GameState state = ST_MENU;
+static unsigned long stateEnteredMs = 0;
 
-const int p3Button = 28;
-const int p3BlueLed = 29;
-const int p3RedLed = 30;
+static unsigned long bangAtUs = 0;      // micros() when "Bang!" went up
+static unsigned long steadyDurationMs = 0;
+static unsigned long firstShotMs = 0;   // millis() of the first valid draw
+static bool haveFirstShot = false;
 
-const int p4Button = 31;
-const int p4BlueLed = 32;
-const int p4RedLed = 33;
+static int botReactionMs = 0;           // solo only; negative = machine misfired
+static bool botResolved = false;
+static bool botWon = false;
 
-const int startButton = 34;
+static bool seeded = false;
 
-const int statusRGB_B = 46;
-const int statusRGB_G = 45;
-const int statusRGB_R = 44;
+// ---------------------------------------------------------------------------
 
+static void enter(GameState next);
 
-const int buzzer = 7; //buzzer to arduino pin 7
+static unsigned long elapsed() { return millis() - stateEnteredMs; }
 
-// settings
-const int timeMin = 100;  // minimum time on "BANG"
-const int timeMax = 4000;  // maximum time on "BANG"
-const unsigned long bangAllDead = 3000;  // everyone died...nobody shot. this is the time after bang to wait for button presses
-
-
-// variables that will change
-int long ranDelay; // random delay for the time for BANG
-int realTime;  //time it took to push button after bang
-unsigned long steadyStart; // when did it say steady?
-unsigned long bangStart;  // when did it say bang?
-unsigned long bangEnd;  // when was button pushed to shoot?
-unsigned long startWait; // start of wait time
-unsigned long shootDelayWait = 0; // how long to wait before end of ready and steady - set each time
-int gameMode = 0; // 0 is ready & 1 is steady, and 2 is bang
-int p1Score = 0;
-int p2Score = 0;
-int p3Score = 0;
-int p4Score = 0;
-
-// variables that need to be reset for each game (same ones should be below as well)
-int gameStarted = 0;  // is there a game happening?
-int p1ButtonPressed = 0; // button not pressed
-int p2ButtonPressed = 0; // button not pressed
-int p3ButtonPressed = 0; // button not pressed
-int p4ButtonPressed = 0; // button not pressed
-int startButtonPressed = 0; // button not pressed
-int deadPlayer = 0; // did someone die by shooting too soon?
-int alivePlayer = 0;  // who lived??
-int gameEnded = 0; // the game is not over
-int p1alive = 1;  // player is alive
-int p2alive = 1;  // player is alive
-int p3alive = 1;  // player is alive
-int p4alive = 1;  // player is alive
-
-
-// debounce code to stop bad reads of the buttons
-// adapted from https://forum.arduino.cc/t/debouncing-multiple-buttons-with-arrays-sample-for-review/499457
-byte buttons[] = {p1Button, p2Button, p3Button, p4Button, startButton}; // pin numbers of the buttons that we'll use
-#define NUMBUTTONS sizeof(buttons)
-int buttonState[NUMBUTTONS];
-int lastButtonState[NUMBUTTONS];
-boolean buttonIsPressed[NUMBUTTONS];
-// the following variables are unsigned longs because the time, measured in
-// milliseconds, will quickly become a bigger number than can be stored in an int.
-long lastDebounceTime = 0; // the last time the output pin was toggled
-long debounceDelay = 50; // the debounce time; increase if the output flickers
-// end debounce code
-
-
-
-void setup() {
-  // debounce code
-  Serial.begin(9600);
-  // define pins:
-  for (int i=0; i<(NUMBUTTONS-1); i++) {
-    pinMode(i, INPUT);
-    lastButtonState[i]=LOW;
-    buttonIsPressed[i]=false;
+// Seed the PRNG from a floating analog pin mixed with the time of the player's
+// first press. Without this the AVR's generator starts from the same state on
+// every power-up, so the Steady-to-Bang delays came out in an identical sequence
+// every session — learnable within a few games, which defeats the whole point.
+static void seedRandomOnce() {
+  if (seeded) {
+    return;
   }
-
-  pinMode(10, OUTPUT);
-  int Contrast=75;
-  analogWrite(10, Contrast);
-  // For LCD for contrast (instead of pent)
-
-
-  // set up the LCD's number of columns and rows:
-  lcd.begin(16, 2);
-  // Clears the LCD screen
-  lcd.clear();
-
-  // initialize LEDs as outputs
-  pinMode(p1BlueLed, OUTPUT);
-  pinMode(p1RedLed, OUTPUT);
-  pinMode(p2BlueLed, OUTPUT);
-  pinMode(p2RedLed, OUTPUT);
-  pinMode(p3BlueLed, OUTPUT);
-  pinMode(p3RedLed, OUTPUT);
-  pinMode(p4BlueLed, OUTPUT);
-  pinMode(p4RedLed, OUTPUT);
-  pinMode(statusRGB_R, OUTPUT);
-  pinMode(statusRGB_G, OUTPUT);
-  pinMode(statusRGB_B, OUTPUT);
-
-  // buzzer
-  pinMode(buzzer, OUTPUT); // Set buzzer as an output
-
-  // initalize buttons as inputs
-  pinMode(p1Button, INPUT);
-  pinMode(p2Button, INPUT);
-  pinMode(p3Button, INPUT);
-  pinMode(p4Button, INPUT);
-  pinMode(startButton, INPUT);
-
-  // initial start screen
-  lcd.begin(16, 2);
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Press the blue");
-  lcd.setCursor(0, 1);
-  lcd.print("button to start");
+  randomSeed(analogRead(SEED_PIN) ^ micros());
+  seeded = true;
 }
 
+// ---------------------------------------------------------------------------
+// Menu
+// ---------------------------------------------------------------------------
 
-void loop() {
-  analogWrite(statusRGB_R, 0);
-  analogWrite(statusRGB_G, 0);
-  analogWrite(statusRGB_B, 255);
-
-  check_buttons();
-  action();
-  if (gameStarted == 1){
-    startGame();
-  }
-
-  //turn LEDs on (nice to see they all work)
-  digitalWrite (p1BlueLed, HIGH);
-  digitalWrite (p1RedLed, HIGH);
-  digitalWrite (p2BlueLed, HIGH);
-  digitalWrite (p2RedLed, HIGH);
-  digitalWrite (p3BlueLed, HIGH);
-  digitalWrite (p3RedLed, HIGH);
-  digitalWrite (p4BlueLed, HIGH);
-  digitalWrite (p4RedLed, HIGH);
+static void showMenu() {
+  lcdShow(modeName(mode()), "Any button=go");
+  setStatusColor(COLOR_BLUE);
+  setAllPlayerLeds(true, true);
 }
 
+static void runMenu() {
+  // The centre button cycles the mode. It is only read here — during a round
+  // this state is not running, so a press mid-round can no longer bump the mode
+  // out of range and leave the box unable to start a game.
+  if (buttonWentDown(BTN_START)) {
+    setMode((GameMode)((mode() + 1) % MODE_COUNT));
+    audioPlay(TRACK_SPIN);
+    DBG(F("mode: "));
+    DBGLN(modeName(mode()));
+    showMenu();
+  }
 
-//debounce code
-void check_buttons() {
-  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
-    // read the state of the switch into a local variable:
-    int reading = digitalRead(buttons[currentButton]); // check to see if you just pressed the button and you've waited long enough since the last press to ignore any noise:
-    // If the switch changed, due to noise or pressing then reset the debouncing timer
-    if (reading != lastButtonState[currentButton]) { lastDebounceTime = millis(); }
-    // whatever the reading is at, it's been there for longer than the debounce delay, so take it as the actual current state:
-    if ((millis() - lastDebounceTime) > debounceDelay) {
-      // if the button state has changed:
-      if (reading != buttonState[currentButton]) {
-        buttonState[currentButton] = reading;
-        if (buttonState[currentButton]==HIGH) { //pushing down on the button
-          buttonIsPressed[currentButton]=true; // set your flag for the adjustment function
-        }
+  // Any station button starts a round. In solo, that station becomes the human.
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    if (buttonWentDown((ButtonId)i)) {
+      seedRandomOnce();
+      if (isSolo(mode())) {
+        setSoloPlayer(i);
       }
-    }
-    // save the reading.  Next time through the loop, it'll be the lastButtonState:
-    lastButtonState[currentButton] = reading;
-  }
-}
-
-//debounce code
-void action() {
-  //lcd.setCursor(0, 1);
-  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
-    if (buttonIsPressed[currentButton]) {
-      //Serial.print("button "); Serial.println(buttons[currentButton]);
-      if (buttons[currentButton]==startButton) { // -------- Start button
-          if (gameStarted == 0){
-            gameStarted = 1;
-          }
-          //lcd.print("Pressed start");
-          startButtonPressed = 1;
-      }
-      if ((buttons[currentButton]==p1Button) || (buttons[currentButton]==p2Button) || (buttons[currentButton]==p3Button) || (buttons[currentButton]==p4Button)){
-        if (buttons[currentButton]==p1Button) { // -------- Player 1 button
-            p1ButtonPressed = 1;
-            //lcd.print("Pressed Player 1");
-        } else if (buttons[currentButton]==p2Button) { // -------- Player 2 button
-            p2ButtonPressed = 1;
-            //lcd.print("Pressed Player 2");
-        } else if (buttons[currentButton]==p3Button) { // -------- Player 3 button
-            p3ButtonPressed = 1;
-            //lcd.print("Pressed Player 3");
-        } else if (buttons[currentButton]==p4Button) { // -------- Player 4 button
-            p4ButtonPressed = 1;
-            //lcd.print("Pressed Player 4");
-        }
-      }
-      buttonIsPressed[currentButton]=false; //reset the button
-    }
-  }
-}
-
-
-void startGame(){
-  gameStarted = 1;
-  // reset the start button to 'unpressed' so we can check for it again later
-  startButtonPressed = 0;
-
-  // now starting READY
-  gameMode = 0; // 0 is ready & 1 is steady, and 2 is bang
-
-  tone(buzzer, 3520, 50); // ready & steady
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Ready");
-
-  analogWrite(statusRGB_R, 0);
-  analogWrite(statusRGB_G, 255);
-  analogWrite(statusRGB_B, 0);
-
-  // turn off player lights
-  digitalWrite (p1BlueLed, LOW);
-  digitalWrite (p1RedLed, LOW);
-  digitalWrite (p2BlueLed, LOW);
-  digitalWrite (p2RedLed, LOW);
-  digitalWrite (p3BlueLed, LOW);
-  digitalWrite (p3RedLed, LOW);
-  digitalWrite (p4BlueLed, LOW);
-  digitalWrite (p4RedLed, LOW);
-
-  // wait for a second between ready and steady - but let people kill themselves
-  shootDelayWait = millis() + 1000;
-  waitForShot();
-
-  // Now starting STEADY
-  gameMode = 1; // 0 is ready & 1 is steady, and 2 is bang
-  tone(buzzer, 3520, 50); // ready & steady sound
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Steady");
-  // Yellow (turn red and green on):
-  analogWrite(statusRGB_R, 255 );
-  analogWrite(statusRGB_G, 160);
-  analogWrite(statusRGB_B, 0);
-
-  // random delay from steady to bang
-  // set steady start to right now
-  // wait for time to expire but also check for buttons being pushed in case someone jumps the gun
-  // if someone shoots before delay is up, they die!
-  ranDelay = random(timeMin, timeMax);
-  shootDelayWait = millis() + ranDelay;
-  waitForShot();
-
-  // Now starting BANG
-  gameMode = 2; // 0 is ready & 1 is steady, and 2 is bang
-  // waiting on first player to shoot after bang!
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Bang!");
-  analogWrite(statusRGB_R, 255);
-  analogWrite(statusRGB_G, 0);
-  analogWrite(statusRGB_B, 0);
-  tone(buzzer, 4699, 50); // bang
-  lcd.setCursor(0, 1);
-
-  // let's see who shoots first!!
-  bangStart = millis();  // also used below for calculating reflex time
-  shootDelayWait = bangStart + bangAllDead;
-  waitForShot();
-
-  // check if everyone died to mark them as dead
-  if (alivePlayer == 0){
-    p1alive = 0;  // player is dead
-    p2alive = 0;  // player is dead
-    p3alive = 0;  // player is dead
-    p4alive = 0;  // player is dead
-  }
-  showAlive();  // either from all dead or from someone shooting correctly
-
-  // how long did it take?
-  realTime = millis() - bangStart;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (alivePlayer == 0){
-    lcd.print(String("Everyone dies!"));
-  } else {
-    lcd.print(String("P") + String(alivePlayer) + String(" wins! ") +String(realTime));
-  }
-  tone(buzzer, 1760, 50); // dead
-
-  // update LEDs to reflect who is alive/dead
-  showAlive();
-
-  // awards point to winner
-  if(p1alive == 1){
-    p1Score = p1Score +1;
-  }
-  if(p2alive == 1){
-    p2Score = p2Score +1;
-  }
-
-  if(p3alive == 1){
-    p3Score = p3Score +1;
-  }
-
-  if(p4alive == 1){
-    p4Score = p4Score +1;
-  }
-
-  //Serial.print(p1Score); Serial.print(" "); Serial.print(p2Score); Serial.print(" "); Serial.print(p3Score); Serial.print(" "); Serial.print(p4Score); Serial.print(" ");
-  lcd.setCursor(0, 1);
-  lcd.print(String(p1Score) + String(" ") + String(p2Score) + String(" ") + String(p3Score) + String(" ") + String(p4Score));
-
-  // keep showing results and wait for start button again
-  waitOnStartButton();
-  resetGame();
-}
-
-
-
-// this waits for someone to either shoot who is alive and runs till time delay ends
-// it handles all three 'wait' periods (ready/steady/bang)
-void waitForShot(){
-  while ((millis() < shootDelayWait) && (alivePlayer == 0)){
-    //Serial.print("waitForShot:  "); Serial.print("game mode: "); Serial.print(gameMode); Serial.print(" start: "); Serial.print(millis()); Serial.print(" delaywait: "); Serial.print(shootDelayWait); Serial.print("\n");
-    check_buttons();
-    action();
-    if ( (p1ButtonPressed == 1) || (p2ButtonPressed == 1) || (p3ButtonPressed == 1) || (p4ButtonPressed == 1)){
-      // someone pushed a button...let's see who (we track it this way cause it checks everyone at the exact same time)
-      // note below - you only can push a button if you are alive
-      if ((p1ButtonPressed == 1) && (p1alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 1;
-          p1alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 1;
-          p2alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
-      }
-      else if ((p2ButtonPressed == 1) && (p2alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 2;
-          p2alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 2;
-          p1alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
-      }
-      else if ((p3ButtonPressed == 1) && (p3alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 3;
-          p3alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 3;
-          p1alive = 0;  // player is dead
-          p2alive = 0;  // player is dead
-          p4alive = 0;  // player is dead
-        }
-      }
-      else if ((p4ButtonPressed == 1) && (p4alive == 1)){
-        if (gameMode < 2) {  // 2 is bang
-          deadPlayer = 4;
-          p4alive = 0;
-          killPlayer();
-        } else {
-          alivePlayer = 4;
-          p1alive = 0;  // player is dead
-          p2alive = 0;  // player is dead
-          p3alive = 0;  // player is dead
-        }
-      }
-    }
-  }
-}
-
-
-
-// update LEDs to dead
-void killPlayer(){
-  if (p1alive == 0){
-    digitalWrite (p1BlueLed, LOW);
-    digitalWrite (p1RedLed, HIGH);
-  }
-  if (p2alive == 0){
-    digitalWrite (p2BlueLed, LOW);
-    digitalWrite (p2RedLed, HIGH);
-  }
-  if (p3alive == 0){
-    digitalWrite (p3BlueLed, LOW);
-    digitalWrite (p3RedLed, HIGH);
-  }
-  if (p4alive == 0){
-    digitalWrite (p4BlueLed, LOW);
-    digitalWrite (p4RedLed, HIGH);
-  }
-}
-
-
-// update LEDs to show who is alive/dead at end of game
-void showAlive(){
-  if (p1alive == 1){
-    digitalWrite (p1BlueLed, HIGH);
-    digitalWrite (p1RedLed, LOW);
-  } else {
-    digitalWrite (p1BlueLed, LOW);
-    digitalWrite (p1RedLed, HIGH);
-  }
-  if (p2alive == 1){
-    digitalWrite (p2BlueLed, HIGH);
-    digitalWrite (p2RedLed, LOW);
-  } else {
-    digitalWrite (p2BlueLed, LOW);
-    digitalWrite (p2RedLed, HIGH);
-  }
-  if (p3alive == 1){
-    digitalWrite (p3BlueLed, HIGH);
-    digitalWrite (p3RedLed, LOW);
-  } else {
-    digitalWrite (p3BlueLed, LOW);
-    digitalWrite (p3RedLed, HIGH);
-  }
-  if (p4alive == 1){
-    digitalWrite (p4BlueLed, HIGH);
-    digitalWrite (p4RedLed, LOW);
-  } else {
-    digitalWrite (p4BlueLed, LOW);
-    digitalWrite (p4RedLed, HIGH);
-  }
-}
-
-void resetGame(){
-  gameStarted = 0;  // is there a game happening?
-  p1ButtonPressed = 0; // button not pressed
-  p2ButtonPressed = 0; // button not pressed
-  p3ButtonPressed = 0; // button not pressed
-  p4ButtonPressed = 0; // button not pressed
-  startButtonPressed = 0; // button not pressed
-  deadPlayer = 0; // did someone die by shooting too soon?
-  alivePlayer = 0;  // who lived??
-  p1alive = 1;  // player is alive
-  p2alive = 1;  // player is alive
-  p3alive = 1;  // player is alive
-  p4alive = 1;  // player is alive
-  gameEnded = 0; // the game is not over
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("New Game! Press");
-  lcd.setCursor(0, 1);
-  lcd.print("blue to start");
-
-}
-
-// wait for start button to be pressed
-void waitOnStartButton(){
-  while(1){
-    check_buttons();
-    action();
-    if (startButtonPressed == 1) {
-      startButtonPressed = 0;  // unpress it again for the future
+      enter(ST_READY);
       return;
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ready / Steady — drawing now is a false start
+// ---------------------------------------------------------------------------
+
+static void watchForFalseStart() {
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    if (!buttonWentDown((ButtonId)i)) {
+      continue;
+    }
+    if (!players[i].alive || !playerInPlay(i)) {
+      continue;
+    }
+
+    killPlayer(i);
+    audioPlay(TRACK_MISS);
+
+    char line[17];
+    snprintf(line, sizeof(line), "P%u fired early!", (unsigned)(i + 1));
+    lcdLine(1, line);
+
+    DBG(F("false start: P"));
+    DBGLN(i + 1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bang
+// ---------------------------------------------------------------------------
+
+static void announceWinner(uint8_t index) {
+  char line[17];
+  snprintf(line, sizeof(line), "P%u wins! %ums", (unsigned)(index + 1),
+           winnerReactionMs(bangAtUs));
+  lcdLine(0, line);
+
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    setPlayerLeds(i, i == index, i != index && playerInPlay(i));
+  }
+}
+
+static void runBang() {
+  // Collect draws. The winner is shown the moment they hit, but the state stays
+  // open a little longer so 2nd/3rd/4th can be ranked — see PLACING_WINDOW_MS.
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    if (!buttonWentDown((ButtonId)i)) {
+      continue;
+    }
+    if (!players[i].alive || !playerInPlay(i)) {
+      continue;
+    }
+
+    const bool isWinningShot = recordShot(i, buttonDownAt((ButtonId)i));
+
+    if (!haveFirstShot) {
+      haveFirstShot = true;
+      firstShotMs = millis();
+    }
+    if (isWinningShot) {
+      audioPlay(TRACK_HIT);
+      announceWinner(i);
+    }
+  }
+
+  // Solo: the machine draws at its own reaction time whether or not the human
+  // has. A negative draw means it misfired before the bang and has already lost.
+  if (isSolo(mode()) && !botResolved && botReactionMs >= 0 &&
+      elapsed() >= (unsigned long)botReactionMs) {
+    botResolved = true;
+    const int8_t human = winner();
+    if (human < 0) {
+      botWon = true;
+      if (!haveFirstShot) {
+        haveFirstShot = true;
+        firstShotMs = millis();
+      }
+    }
+  }
+
+  // Round over?
+  if (haveFirstShot && (millis() - firstShotMs) >= PLACING_WINDOW_MS) {
+    enter(ST_RESULTS);
+    return;
+  }
+  if (elapsed() >= BANG_TIMEOUT_MS) {
+    enter(ST_RESULTS);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Results
+// ---------------------------------------------------------------------------
+
+static void showSoloResult() {
+  char top[17], bottom[17];
+  const uint8_t me = soloPlayer();
+
+  if (botReactionMs < 0 && players[me].alive) {
+    // The machine drew before the bang.
+    snprintf(top, sizeof(top), "Bot fired early!");
+    snprintf(bottom, sizeof(bottom), "You win");
+  } else if (!players[me].alive) {
+    snprintf(top, sizeof(top), "You fired early!");
+    snprintf(bottom, sizeof(bottom), "Bot wins");
+  } else if (botWon || !players[me].fired) {
+    snprintf(top, sizeof(top), "Bot wins  %dms", botReactionMs);
+    snprintf(bottom, sizeof(bottom), "Too slow!");
+  } else {
+    snprintf(top, sizeof(top), "You win!  %ums", winnerReactionMs(bangAtUs));
+    snprintf(bottom, sizeof(bottom), "Bot was %dms", botReactionMs);
+  }
+
+  lcdShow(top, bottom);
+}
+
+static void showMultiResult() {
+  const int8_t w = winner();
+
+  if (w < 0) {
+    lcdShow("Everyone dies!", "Nobody drew");
+    return;
+  }
+
+  char top[17];
+  snprintf(top, sizeof(top), "P%u wins! %ums", (unsigned)(w + 1),
+           winnerReactionMs(bangAtUs));
+
+  // "P3>P1>P4>P2" — everyone who drew, fastest first. Four entries is 11
+  // characters, so this always fits the 16-column display.
+  char bottom[17] = "";
+  uint8_t used = 0;
+  for (uint8_t place = 1; place <= PLAYER_COUNT; place++) {
+    for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+      if (players[i].place != place || used + 3 >= (uint8_t)sizeof(bottom)) {
+        continue;
+      }
+      if (used > 0) {
+        bottom[used++] = '>';
+      }
+      bottom[used++] = 'P';
+      bottom[used++] = (char)('1' + i);
+      bottom[used] = '\0';
+    }
+  }
+
+  lcdShow(top, bottom);
+}
+
+static void enterResults() {
+  const int8_t w = winner();
+
+  if (isSolo(mode())) {
+    if (botWon || (botReactionMs >= 0 && w < 0)) {
+      killPlayer(soloPlayer());
+    }
+  } else if (w >= 0) {
+    // Everyone who did not draw first loses.
+    for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+      if (i != (uint8_t)w) {
+        killPlayer(i);
+      }
+    }
+  } else {
+    killEveryone();  // the bang timeout expired with nobody drawing
+  }
+
+  assignPlaces();
+  awardScores();
+  showAliveLeds();
+  setStatusColor(w >= 0 ? COLOR_GREEN : COLOR_RED);
+
+  if (isSolo(mode())) {
+    showSoloResult();
+  } else {
+    showMultiResult();
+  }
+}
+
+static void showScores() {
+  char bottom[17];
+  snprintf(bottom, sizeof(bottom), "%2u %2u %2u %2u", (unsigned)players[0].score,
+           (unsigned)players[1].score, (unsigned)players[2].score,
+           (unsigned)players[3].score);
+  lcdShow("P1 P2 P3 P4", bottom);
+}
+
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+static void enter(GameState next) {
+  state = next;
+  stateEnteredMs = millis();
+
+  switch (next) {
+    case ST_MENU:
+      showMenu();
+      break;
+
+    case ST_READY:
+      // Drop anything registered before now. Without this, a player idly tapping
+      // their button while the menu was up had that press still latched when the
+      // round began — and died during "Ready" without touching anything.
+      buttonsClearAll();
+      roundReset();
+
+      haveFirstShot = false;
+      botResolved = false;
+      botWon = false;
+      botReactionMs = 0;
+
+      setAllPlayerLeds(false, false);
+      setStatusColor(COLOR_GREEN);
+      lcdShow("Ready", "");
+      audioPlay(TRACK_READY);
+      break;
+
+    case ST_STEADY:
+      steadyDurationMs = random(STEADY_MIN_MS, STEADY_MAX_MS);
+      setStatusColor(COLOR_YELLOW);
+      lcdShow("Steady", "");
+      audioPlay(TRACK_STEADY);
+      DBG(F("steady for "));
+      DBGLN(steadyDurationMs);
+      break;
+
+    case ST_BANG:
+      setStatusColor(COLOR_RED);
+      lcdShow("Bang!", "");
+      audioPlay(TRACK_BANG);
+      if (isSolo(mode())) {
+        botReactionMs = botDrawReactionMs(mode());
+      }
+      // Taken last so that the LCD write and the audio command — the audio
+      // especially, if it is still on SoftwareSerial — are not counted as part
+      // of anyone's reaction time.
+      bangAtUs = micros();
+      stateEnteredMs = millis();
+      break;
+
+    case ST_RESULTS:
+      enterResults();
+      break;
+
+    case ST_SCORES:
+      // Drop presses left over from the round so the scores stay up long enough
+      // to read, rather than being skipped by the shot that ended it.
+      buttonsClearAll();
+      showScores();
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+void setup() {
+  hardwareBegin();
+  setMode(MODE_MULTI);
+  roundReset();
+  enter(ST_MENU);
+  DBGLN(F("RSB5001 ready"));
+}
+
+void loop() {
+  buttonsPoll();
+
+  switch (state) {
+    case ST_MENU:
+      runMenu();
+      break;
+
+    case ST_READY:
+      watchForFalseStart();
+      if (elapsed() >= READY_MS) {
+        enter(ST_STEADY);
+      }
+      break;
+
+    case ST_STEADY:
+      watchForFalseStart();
+      if (elapsed() >= steadyDurationMs) {
+        enter(ST_BANG);
+      }
+      break;
+
+    case ST_BANG:
+      runBang();
+      break;
+
+    case ST_RESULTS:
+      if (elapsed() >= RESULT_DWELL_MS) {
+        enter(ST_SCORES);
+      }
+      break;
+
+    case ST_SCORES:
+      // Any button returns to the menu, so whoever is nearest can move things
+      // along.
+      for (uint8_t i = 0; i < BUTTON_COUNT; i++) {
+        if (buttonWentDown((ButtonId)i)) {
+          enter(ST_MENU);
+          return;
+        }
+      }
+      break;
   }
 }
