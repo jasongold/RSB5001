@@ -132,30 +132,89 @@ void setAllPlayerLeds(bool blue, bool red) {
 // LCD
 // ---------------------------------------------------------------------------
 
-void lcdShow(const char* line1, const char* line2) {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(line1);
-  lcd.setCursor(0, 1);
-  lcd.print(line2);
+// A shadow copy of what should be on screen. The resync clears the display, so
+// a single-row update has to repaint the row it is not changing.
+static char lcdBuf[2][17] = {{0}, {0}};
+
+static void pulseEnable() {
+  digitalWrite(LCD_EN, LOW);
+  delayMicroseconds(1);
+  digitalWrite(LCD_EN, HIGH);
+  delayMicroseconds(1);  // the enable pulse must be held at least 450 ns
+  digitalWrite(LCD_EN, LOW);
+  delayMicroseconds(100);  // most commands settle in 37 us
 }
 
-void lcdShowFresh(const char* line1, const char* line2) {
-  lcd.begin(16, 2);  // resyncs the controller; see hardware.h
-  lcdShow(line1, line2);
+static void writeNibble(uint8_t value) {
+  digitalWrite(LCD_D4, (value >> 0) & 0x01);
+  digitalWrite(LCD_D5, (value >> 1) & 0x01);
+  digitalWrite(LCD_D6, (value >> 2) & 0x01);
+  digitalWrite(LCD_D7, (value >> 3) & 0x01);
+  pulseEnable();
+}
+
+static void writeCommand(uint8_t value) {
+  writeNibble(value >> 4);
+  writeNibble(value & 0x0F);
+}
+
+void lcdResync() {
+  digitalWrite(LCD_RS, LOW);
+  digitalWrite(LCD_EN, LOW);
+
+  // Three 8-bit function sets. Whatever half-byte the controller was waiting
+  // for, these leave it in 8-bit mode; the 0x02 then selects 4-bit.
+  writeNibble(0x03);
+  delayMicroseconds(4500);
+  writeNibble(0x03);
+  delayMicroseconds(4500);
+  writeNibble(0x03);
+  delayMicroseconds(150);
+  writeNibble(0x02);
+
+  writeCommand(0x28);  // 4-bit, 2 lines, 5x8 font   (LiquidCrystal 0x28)
+  writeCommand(0x0C);  // display on, cursor off, no blink        (0x0C)
+  writeCommand(0x01);  // clear
+  delayMicroseconds(2000);
+  writeCommand(0x06);  // entry mode: advance right, no shift     (0x06)
+}
+
+// Resync, then repaint both rows from the shadow copy.
+static void lcdRepaint() {
+  lcdResync();
+  for (uint8_t row = 0; row < 2; row++) {
+    lcd.setCursor(0, row);
+    for (uint8_t col = 0; col < 16; col++) {
+      const char c = lcdBuf[row][col];
+      lcd.write(c ? c : ' ');
+    }
+  }
+}
+
+static void setBufRow(uint8_t row, const char* text) {
+  uint8_t i = 0;
+  while (i < 16 && text[i] != '\0') {
+    lcdBuf[row][i] = text[i];
+    i++;
+  }
+  while (i < 16) {
+    lcdBuf[row][i++] = ' ';
+  }
+  lcdBuf[row][16] = '\0';
+}
+
+void lcdShow(const char* line1, const char* line2) {
+  setBufRow(0, line1);
+  setBufRow(1, line2);
+  lcdRepaint();
 }
 
 void lcdLine(uint8_t row, const char* text) {
-  lcd.setCursor(0, row);
-  uint8_t written = 0;
-  while (text[written] != '\0' && written < 16) {
-    lcd.write(text[written]);
-    written++;
+  if (row > 1) {
+    return;
   }
-  while (written < 16) {
-    lcd.write(' ');
-    written++;
-  }
+  setBufRow(row, text);
+  lcdRepaint();
 }
 
 // ---------------------------------------------------------------------------

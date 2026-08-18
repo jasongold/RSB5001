@@ -78,7 +78,7 @@ static void seedRandomOnce() {
 // ---------------------------------------------------------------------------
 
 static void showMenu() {
-  lcdShowFresh(modeName(mode()), "Any button=go");
+  lcdShow(modeName(mode()), "Any button=go");
   setStatusColor(COLOR_BLUE);
   setAllPlayerLeds(true, true);
 }
@@ -222,14 +222,14 @@ static void showSoloResult() {
     snprintf(bottom, sizeof(bottom), "Bot was %dms", botReactionMs);
   }
 
-  lcdShowFresh(top, bottom);
+  lcdShow(top, bottom);
 }
 
 static void showMultiResult() {
   const int8_t w = winner();
 
   if (w < 0) {
-    lcdShowFresh("Everyone dies!", "Nobody drew");
+    lcdShow("Everyone dies!", "Nobody drew");
     return;
   }
 
@@ -255,7 +255,7 @@ static void showMultiResult() {
     }
   }
 
-  lcdShowFresh(top, bottom);
+  lcdShow(top, bottom);
 }
 
 static void enterResults() {
@@ -293,7 +293,7 @@ static void showScores() {
   snprintf(bottom, sizeof(bottom), "%2u %2u %2u %2u", (unsigned)players[0].score,
            (unsigned)players[1].score, (unsigned)players[2].score,
            (unsigned)players[3].score);
-  lcdShowFresh("P1 P2 P3 P4", bottom);
+  lcdShow("P1 P2 P3 P4", bottom);
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +323,7 @@ static void enter(GameState next) {
 
       setAllPlayerLeds(false, false);
       setStatusColor(COLOR_GREEN);
-      lcdShowFresh("Ready", "");
+      lcdShow("Ready", "");
       audioPlay(TRACK_READY);
       break;
 

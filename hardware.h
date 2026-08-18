@@ -97,25 +97,36 @@ void setAllPlayerLeds(bool blue, bool red);
 // LCD
 // ---------------------------------------------------------------------------
 
-// Clear the display and write both lines. Pass "" for a blank line.
-// Fast — about 2 ms. Use where timing matters.
+// Write both lines. Pass "" for a blank line.
+//
+// Every write resyncs the controller first — see lcdResync() below — so a
+// garbled display fixes itself on the very next screen change.
 void lcdShow(const char* line1, const char* line2);
 
-// Re-run the controller's full init sequence, then write both lines.
-//
-// Costs about 65 ms, so it is only for round boundaries, never the Steady or
-// Bang transitions.
-//
-// This exists because the display can lose 4-bit nibble sync — a glitch on the
-// enable line clocks in half a byte, and from then on every character is
-// misread. lcd.clear() cannot recover from that: it is sent over the same
-// desynced link. Only the init sequence resyncs the controller, because it is
-// designed to be understood from any state.
-void lcdShowFresh(const char* line1, const char* line2);
-
-// Rewrite one row in place, padded to 16 characters so leftovers cannot show
-// through. Row 0 is the top.
+// Rewrite one row, padded to 16 characters. Row 0 is the top. The other row is
+// preserved from a shadow copy, since the resync clears the display.
 void lcdLine(uint8_t row, const char* text);
+
+// Put the HD44780 back into a known state without the power-on settling delay.
+//
+// The display intermittently loses 4-bit nibble sync: a glitch on the enable
+// line clocks in half a byte, and every character after it is misread. The
+// suspected source is that the enable line sits on pin 13, which also drives
+// the board's LED through its resistor — moving it to pin 11 would be the
+// actual cure. Until then this recovers from it.
+//
+// lcd.clear() cannot: the clear command travels over the same desynced link.
+// Only the init sequence resyncs the controller, because the three leading
+// 0x03 nibbles are understood whatever half-byte the controller was waiting on.
+//
+// lcd.begin() would also work, but it opens with a 50 ms wait for the supply to
+// rise after power-on, which is irrelevant to a resync. Skipping it takes this
+// from about 65 ms to about 12 ms — short enough to run before every write
+// without the blank screen becoming a visible cue that "Bang!" is coming.
+//
+// The state left behind matches LiquidCrystal's own defaults exactly (0x28 /
+// 0x0C / 0x06), so the library's cached settings stay truthful afterwards.
+void lcdResync();
 
 // ---------------------------------------------------------------------------
 // Audio
