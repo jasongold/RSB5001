@@ -1,0 +1,652 @@
+
+/*
+
+Me and my Son's version of Ready Steady Bang!
+We call it RSB5001
+
+more documentation coming soon......
+
+Ideas for future additions:
+- Might be cool to see 2nd/3rd/4th place
+- Single player
+- Keep track of fastest time
+
+
+This uses an arduino mega board (about $15).  I wanted to use a mega board 
+due to the large number of pins - and did not want to use a single pin
+with multiple buttons as I wasn't sure it would check for input on all 
+buttons simultaneously with precision required for this project  (it might)
+
+
+2 = bang
+3 = miss
+4 = sready
+5 = rsbang
+6 = steady
+
+ */
+
+// include the library code:
+#include <LiquidCrystal.h>
+
+// Creates an LCD object. Parameters: (rs, enable, d4, d5, d6, d7)
+LiquidCrystal lcd(12, 13, 5, 4, 3, 2);
+
+// include libraries for DFPlayer
+#include <SoftwareSerial.h>
+#include "DFRobotDFPlayerMini.h"
+
+// initialize mp3 player
+SoftwareSerial mySoftwareSerial(54, 55); // RX, TX
+DFRobotDFPlayerMini myDFPlayer;
+
+// setup pins for player
+// Setup variables for the buttons and LEDs
+// using const because they will never change
+const int p1Button = 25;
+const int p1BlueLed = 23;
+const int p1RedLed = 22;
+
+const int p2Button = 27;
+const int p2BlueLed = 24;
+const int p2RedLed = 26;
+
+const int p3Button = 29;
+const int p3BlueLed = 28;
+const int p3RedLed = 30;
+
+const int p4Button = 31;
+const int p4BlueLed = 32;
+const int p4RedLed = 34;
+
+const int startButton = 52;
+
+const int statusRGB_B = 36;
+const int statusRGB_G = 38;
+const int statusRGB_R = 40;
+
+const int buzzer = 7; //buzzer to arduino pin 7
+
+// game settings
+
+// change below to true for debug or false for no debug and save a bit of memory and CPU
+#define DEBUG true
+#define Serial if(DEBUG)Serial
+
+const int debug = 1; // set to 1 for debug mode (prints debug info to serial monitor) or set to 0
+const int timeMin = 100;  // minimum time on "BANG"
+const int timeMax = 4000;  // maximum time on "BANG"
+const unsigned long bangAllDead = 3000;  // everyone died...nobody shot. this is the time after bang to wait for button presses
+
+
+// variables that will change
+int long ranDelay; // random delay for the time for BANG
+int realTime;  //time it took to push button after bang
+unsigned long steadyStart; // when did it say steady?
+unsigned long bangStart;  // when did it say bang?
+unsigned long bangEnd;  // when was button pushed to shoot?
+unsigned long startWait; // start of wait time
+unsigned long shootDelayWait = 0; // how long to wait before end of ready and steady - set each time
+int gameStage = 0; // 0 is ready & 1 is steady, and 2 is bang
+int p1Score = 0;
+int p2Score = 0;
+int p3Score = 0;
+int p4Score = 0;
+int gameMode = 0; // game mode (single / multiplayer)
+int randomDeath = 11; // random number for death
+
+// variables that need to be reset for each game (same ones should be below as well)
+int gameStarted = 0;  // is there a game happening?
+int p1ButtonPressed = 0; // button not pressed
+int p2ButtonPressed = 0; // button not pressed
+int p3ButtonPressed = 0; // button not pressed
+int p4ButtonPressed = 0; // button not pressed
+int startButtonPressed = 0; // button not pressed
+int deadPlayer = 0; // did someone die by shooting too soon?
+int alivePlayer = 0;  // who lived??
+int gameEnded = 0; // the game is not over
+int p1alive = 1;  // player is alive
+int p2alive = 1;  // player is alive
+int p3alive = 1;  // player is alive
+int p4alive = 1;  // player is alive
+
+// debounce code to stop bad reads of the buttons
+// adapted from https://forum.arduino.cc/t/debouncing-multiple-buttons-with-arrays-sample-for-review/499457
+byte buttons[] = {p1Button, p2Button, p3Button, p4Button, startButton}; // pin numbers of the buttons that we'll use
+#define NUMBUTTONS sizeof(buttons)
+int buttonState[NUMBUTTONS];
+int lastButtonState[NUMBUTTONS];
+boolean buttonIsPressed[NUMBUTTONS];
+// the following variables are unsigned longs because the time, measured in
+// milliseconds, will quickly become a bigger number than can be stored in an int.
+long lastDebounceTime = 0; // the last time the output pin was toggled
+long debounceDelay = 50; // the debounce time; increase if the output flickers
+// end debounce code
+
+
+
+void setup() {
+  // initialize serial monitors for player and debugger
+  mySoftwareSerial.begin(9600);
+  Serial.begin(115200);
+  Serial.println("initializing...");
+
+  // make sure mp3 is working then set volume
+  if (!myDFPlayer.begin(mySoftwareSerial)) {  //Use softwareSerial to communicate with mp3.
+    Serial.println(F("Unable to begin:"));
+    Serial.println(F("1.Please recheck the connection!"));
+    Serial.println(F("2.Please insert the SD card!"));
+  }
+  Serial.println(F("DFPlayer Mini online."));
+  myDFPlayer.volume(30);  //Set volume value. From 0 to 30  
+
+  // play sound to start
+  //myDFPlayer.playMp3Folder(1);  //Play ready mp3
+
+  
+  // define pins:
+  for (int i=0; i<(NUMBUTTONS-1); i++) {
+    pinMode(i, INPUT);
+    lastButtonState[i]=LOW;
+    buttonIsPressed[i]=false;
+  }
+
+  // For LCD for contrast (instead of pot)
+  pinMode(10, OUTPUT);
+  int Contrast=75;
+  analogWrite(10, Contrast);
+
+
+
+  // initialize LEDs as outputs
+  pinMode(p1BlueLed, OUTPUT);
+  pinMode(p1RedLed, OUTPUT);
+  pinMode(p2BlueLed, OUTPUT);
+  pinMode(p2RedLed, OUTPUT);
+  pinMode(p3BlueLed, OUTPUT);
+  pinMode(p3RedLed, OUTPUT);
+  pinMode(p4BlueLed, OUTPUT);
+  pinMode(p4RedLed, OUTPUT);
+  pinMode(statusRGB_R, OUTPUT);
+  pinMode(statusRGB_G, OUTPUT);
+  pinMode(statusRGB_B, OUTPUT);
+
+  // buzzer
+  pinMode(buzzer, OUTPUT); // Set buzzer as an output
+
+  // initalize buttons as inputs
+  pinMode(p1Button, INPUT);
+  pinMode(p2Button, INPUT);
+  pinMode(p3Button, INPUT);
+  pinMode(p4Button, INPUT);
+  pinMode(startButton, INPUT);
+
+
+  // initial start screen
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  lcd.print("Press the center");
+  lcd.setCursor(0, 1);
+  lcd.print("button to start");
+
+  // debug
+  Serial.println("Starting...");
+}
+
+
+void loop() {
+  // turn center LED to blue
+  analogWrite(statusRGB_R, 0);
+  analogWrite(statusRGB_G, 0);
+  analogWrite(statusRGB_B, 255);
+
+  //turn LEDs on (nice to see they all work)
+  digitalWrite (p1BlueLed, HIGH);
+  digitalWrite (p1RedLed, HIGH);
+  digitalWrite (p2BlueLed, HIGH);
+  digitalWrite (p2RedLed, HIGH);
+  digitalWrite (p3BlueLed, HIGH);
+  digitalWrite (p3RedLed, HIGH);
+  digitalWrite (p4BlueLed, HIGH);
+  digitalWrite (p4RedLed, HIGH);
+  
+  check_buttons();
+  action();
+  if (gameStarted == 1) {
+    unpressButtons();  // reset player buttons to not pressed
+    if (gameMode == 1) {
+      //startSingleGame();
+    } else if (gameMode == 2) {
+      startMultiGame();    
+    }
+    // keep showing results and wait for start or player button for next game or reset
+    unpressButtons();
+    Serial.println("Waiting...");
+    waitOnAnyButtonToContinue();
+  }
+}
+
+
+
+//debounce code
+void check_buttons() {
+  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
+    // read the state of the switch into a local variable:
+    int reading = digitalRead(buttons[currentButton]); // check to see if you just pressed the button and you've waited long enough since the last press to ignore any noise:
+    // If the switch changed, due to noise or pressing then reset the debouncing timer
+    if (reading != lastButtonState[currentButton]) { lastDebounceTime = millis(); }
+    // whatever the reading is at, it's been there for longer than the debounce delay, so take it as the actual current state:
+    if ((millis() - lastDebounceTime) > debounceDelay) {
+      // if the button state has changed:
+      if (reading != buttonState[currentButton]) {
+        buttonState[currentButton] = reading;
+        if (buttonState[currentButton]==HIGH) { //pushing down on the button
+          buttonIsPressed[currentButton]=true; // set your flag for the adjustment function
+        }
+      }
+    }
+    // save the reading.  Next time through the loop, it'll be the lastButtonState:
+    lastButtonState[currentButton] = reading;
+  }
+}
+
+
+
+//debounce code
+void action() {
+  //lcd.setCursor(0, 1);
+  for (int currentButton=0; currentButton<NUMBUTTONS; currentButton++) {
+    if (buttonIsPressed[currentButton]) {
+      if (buttons[currentButton]==startButton) { 
+          Serial.println("Pressed start");
+          myDFPlayer.playMp3Folder(7);  //Play spin mp3
+          //myDFPlayer.play(7);  //Play spin mp3
+          gameMode++;  //increment game mode
+          startButtonPressed = 1;
+          if (gameStarted == 0){
+            if (gameMode == 1) {
+                lcd.begin(16, 2);
+                //lcd.clear();
+                //lcd.setCursor(0, 0);
+                lcd.print("Press clicker");
+                lcd.setCursor(0, 1);
+                lcd.print("for singleplayer");
+            }
+            if (gameMode == 2) {
+                lcd.begin(16, 2);
+                //lcd.clear();
+                //lcd.setCursor(0, 0);
+                lcd.print("Press clicker");
+                lcd.setCursor(0, 1);
+                lcd.print("for multiplayer");
+            }  
+            if ((gameMode == 0) || (gameMode > 2)){  //show message if higher than number of types of games at top
+                lcd.begin(16, 2);
+                //lcd.clear();
+                //lcd.setCursor(0, 0);
+                lcd.print("Press select");
+                lcd.setCursor(0, 1);
+                lcd.print("to choose mode");
+                if (gameMode > 2 ){
+                  gameMode = 0;  // start over at 0 
+                }
+            }
+          }
+      }
+      if ((buttons[currentButton]==p1Button) || (buttons[currentButton]==p2Button) || (buttons[currentButton]==p3Button) || (buttons[currentButton]==p4Button)){
+        // debug
+        Serial.println("button pressed: " + (String)buttons[currentButton]);
+
+        // start game if any player button is pressed
+        if ((gameStarted == 0) && (gameMode > 0)){
+          // first 'unpress' the buttons
+          unpressButtons();
+          // change flag to start game
+          gameStarted = 1;
+        }
+        
+        if (buttons[currentButton]==p1Button) { // -------- Player 1 button
+            p1ButtonPressed = 1;
+            // lcd.print("Pressed Player 1");  // debug button
+        } else if (buttons[currentButton]==p2Button) { // -------- Player 2 button
+            p2ButtonPressed = 1;
+            // lcd.print("Pressed Player 2");  // debug button
+        } else if (buttons[currentButton]==p3Button) { // -------- Player 3 button
+            p3ButtonPressed = 1;
+            // lcd.print("Pressed Player 3");  // debug button
+        } else if (buttons[currentButton]==p4Button) { // -------- Player 4 button
+            p4ButtonPressed = 1;
+            // lcd.print("Pressed Player 4");  // debug button
+        }
+      }
+      buttonIsPressed[currentButton]=false; //reset the button
+
+     // show status at end of process if a button is pressed
+     Serial.print("button "); Serial.println(buttons[currentButton]);
+     Serial.print("game started="); Serial.println(gameStarted); Serial.print(" game mode="); Serial.println(gameMode);  
+   
+    }
+  }
+}
+
+void startMultiGame(){
+  gameStarted = 1;
+  // reset the start button to 'unpressed' so we can check for it again later
+  startButtonPressed = 0;
+
+  // now starting READY
+  gameStage = 0; // 0 is ready & 1 is steady, and 2 is bang
+
+  //tone(buzzer, 3520, 50); // ready & steady
+  myDFPlayer.playMp3Folder(4);  //Play ready mp3
+
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  lcd.print("Ready");
+
+  // center led to green
+  analogWrite(statusRGB_R, 0);
+  analogWrite(statusRGB_G, 255);
+  analogWrite(statusRGB_B, 0);
+
+  // turn off player lights
+  digitalWrite (p1BlueLed, LOW);
+  digitalWrite (p1RedLed, LOW);
+  digitalWrite (p2BlueLed, LOW);
+  digitalWrite (p2RedLed, LOW);
+  digitalWrite (p3BlueLed, LOW);
+  digitalWrite (p3RedLed, LOW);
+  digitalWrite (p4BlueLed, LOW);
+  digitalWrite (p4RedLed, LOW);
+  
+  Serial.println("game mode: " + (String)gameMode + " game stage=" + (String)gameStage + " p1p=" + (String)p1ButtonPressed + " p2p=" + (String)p2ButtonPressed + " p3p=" + (String)p3ButtonPressed + " p4p=" + (String)p4ButtonPressed);
+
+  // wait for a second between ready and steady - but let people kill themselves
+  shootDelayWait = millis() + 1000;
+  waitForShot();
+
+  // Now starting STEADY
+  gameStage = 1; // 0 is ready & 1 is steady, and 2 is bang
+  
+  //tone(buzzer, 3520, 50); // ready & steady sound
+  myDFPlayer.playMp3Folder(6);  //Play steady mp3
+    
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  lcd.print("Steady");
+  
+  // Yellow (turn red and green on):
+  analogWrite(statusRGB_R, 255 );
+  analogWrite(statusRGB_G, 160);
+  analogWrite(statusRGB_B, 0);
+
+  // random delay from steady to bang
+  // set steady start to right now
+  // wait for time to expire but also check for buttons being pushed in case someone jumps the gun
+  // if someone shoots before delay is up, they die!
+  ranDelay = random(timeMin, timeMax);
+  shootDelayWait = millis() + ranDelay;
+  waitForShot();
+
+  // Now starting BANG
+  gameStage = 2; // 0 is ready & 1 is steady, and 2 is bang
+  // waiting on first player to shoot after bang!
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  lcd.print("Bang!");
+  analogWrite(statusRGB_R, 255);
+  analogWrite(statusRGB_G, 0);
+  analogWrite(statusRGB_B, 0);
+  //tone(buzzer, 4699, 50); // bang
+  myDFPlayer.playMp3Folder(5);  //Play saying bang mp3
+  lcd.setCursor(0, 1);
+
+  // let's see who shoots first!!
+  bangStart = millis();  // also used below for calculating reflex time
+  shootDelayWait = bangStart + bangAllDead;
+  waitForShot();
+
+  // check if everyone died to mark them as dead
+  if (alivePlayer == 0){
+    p1alive = 0;  // player is dead
+    p2alive = 0;  // player is dead
+    p3alive = 0;  // player is dead
+    p4alive = 0;  // player is dead
+  } else{
+    myDFPlayer.playMp3Folder(2);  //Play sound of bang mp3
+  }
+  showAlive();  // either from all dead or from someone shooting correctly
+
+  // how long did it take?
+  realTime = millis() - bangStart;
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  if (alivePlayer == 0){
+    lcd.print(String("Everyone dies!"));
+  } else {
+    lcd.print(String("P") + String(alivePlayer) + String(" wins! ") +String(realTime));
+  }
+  // tone(buzzer, 1760, 50); // dead
+
+  // play random death sound
+  //randomDeath = random(11,19);
+  //myDFPlayer.playMp3Folder(randomDeath);  //Play random death mp3
+
+  // update LEDs to reflect who is alive/dead
+  showAlive();
+
+  // awards point to winner
+  if(p1alive == 1){
+    p1Score = p1Score +1;
+  }
+  if(p2alive == 1){
+    p2Score = p2Score +1;
+  }
+
+  if(p3alive == 1){
+    p3Score = p3Score +1;
+  }
+
+  if(p4alive == 1){
+    p4Score = p4Score +1;
+  }
+
+  //Serial.print(p1Score); Serial.print(" "); Serial.print(p2Score); Serial.print(" "); Serial.print(p3Score); Serial.print(" "); Serial.print(p4Score); Serial.print(" ");
+  lcd.setCursor(0, 1);
+  lcd.print(String(p1Score) + String(" ") + String(p2Score) + String(" ") + String(p3Score) + String(" ") + String(p4Score));
+
+  // wait 2 seconds before next game
+  delay(2000);
+  // just end of game - will check for next game in loop
+
+}
+
+
+
+// this waits for someone to either shoot who is alive and runs till time delay ends
+// it handles all three 'wait' periods (ready/steady/bang)
+void waitForShot(){
+  while ((millis() < shootDelayWait) && (alivePlayer == 0)){
+    //Serial.print("waitForShot:  "); Serial.print("game mode: "); Serial.print(gameStage); Serial.print(" start: "); Serial.print(millis()); Serial.print(" delaywait: "); Serial.print(shootDelayWait); Serial.print("\n");
+    check_buttons();
+    action();
+    if ( (p1ButtonPressed == 1) || (p2ButtonPressed == 1) || (p3ButtonPressed == 1) || (p4ButtonPressed == 1)){
+      // someone pushed a button...let's see who (we track it this way cause it checks everyone at the exact same time)
+      // note below - you only can push a button if you are alive
+      if ((p1ButtonPressed == 1) && (p1alive == 1)){
+        if (gameStage < 2) {  // 2 is bang
+          deadPlayer = 1;
+          p1alive = 0;
+          killPlayer();
+        } else {
+          alivePlayer = 1;
+          p2alive = 0;  // player is dead
+          p3alive = 0;  // player is dead
+          p4alive = 0;  // player is dead
+        }
+      }
+      else if ((p2ButtonPressed == 1) && (p2alive == 1)){
+        if (gameStage < 2) {  // 2 is bang
+          deadPlayer = 2;
+          p2alive = 0;
+          killPlayer();
+        } else {
+          alivePlayer = 2;
+          p1alive = 0;  // player is dead
+          p3alive = 0;  // player is dead
+          p4alive = 0;  // player is dead
+        }
+      }
+      else if ((p3ButtonPressed == 1) && (p3alive == 1)){
+        if (gameStage < 2) {  // 2 is bang
+          deadPlayer = 3;
+          p3alive = 0;
+          killPlayer();
+        } else {
+          alivePlayer = 3;
+          p1alive = 0;  // player is dead
+          p2alive = 0;  // player is dead
+          p4alive = 0;  // player is dead
+        }
+      }
+      else if ((p4ButtonPressed == 1) && (p4alive == 1)){
+        if (gameStage < 2) {  // 2 is bang
+          deadPlayer = 4;
+          p4alive = 0;
+          killPlayer();
+        } else {
+          alivePlayer = 4;
+          p1alive = 0;  // player is dead
+          p2alive = 0;  // player is dead
+          p3alive = 0;  // player is dead
+        }
+      }
+    }
+  }
+}
+
+
+
+// update LEDs to dead
+void killPlayer(){
+  // play shot sound
+  myDFPlayer.playMp3Folder(3);  //Play miss mp3
+
+  if (p1alive == 0){
+    digitalWrite (p1BlueLed, LOW);
+    digitalWrite (p1RedLed, HIGH);
+  }
+  if (p2alive == 0){
+    digitalWrite (p2BlueLed, LOW);
+    digitalWrite (p2RedLed, HIGH);
+  }
+  if (p3alive == 0){
+    digitalWrite (p3BlueLed, LOW);
+    digitalWrite (p3RedLed, HIGH);
+  }
+  if (p4alive == 0){
+    digitalWrite (p4BlueLed, LOW);
+    digitalWrite (p4RedLed, HIGH);
+  }
+}
+
+
+// update LEDs to show who is alive/dead at end of game
+void showAlive(){
+  if (p1alive == 1){
+    digitalWrite (p1BlueLed, HIGH);
+    digitalWrite (p1RedLed, LOW);
+  } else {
+    digitalWrite (p1BlueLed, LOW);
+    digitalWrite (p1RedLed, HIGH);
+  }
+  if (p2alive == 1){
+    digitalWrite (p2BlueLed, HIGH);
+    digitalWrite (p2RedLed, LOW);
+  } else {
+    digitalWrite (p2BlueLed, LOW);
+    digitalWrite (p2RedLed, HIGH);
+  }
+  if (p3alive == 1){
+    digitalWrite (p3BlueLed, HIGH);
+    digitalWrite (p3RedLed, LOW);
+  } else {
+    digitalWrite (p3BlueLed, LOW);
+    digitalWrite (p3RedLed, HIGH);
+  }
+  if (p4alive == 1){
+    digitalWrite (p4BlueLed, HIGH);
+    digitalWrite (p4RedLed, LOW);
+  } else {
+    digitalWrite (p4BlueLed, LOW);
+    digitalWrite (p4RedLed, HIGH);
+  }
+}
+
+
+// unpresses all the buttons
+void unpressButtons(){
+  p1ButtonPressed = 0; // button not pressed
+  p2ButtonPressed = 0; // button not pressed
+  p3ButtonPressed = 0; // button not pressed
+  p4ButtonPressed = 0; // button not pressed
+}
+
+
+
+// this sets up the next game - intend to use this for all games
+void nextGame(){
+  Serial.println("setting up next game");  
+  gameStarted = 0;  // is there a game happening?
+  unpressButtons();
+  startButtonPressed = 0; // button not pressed
+  deadPlayer = 0; // did someone die by shooting too soon?
+  alivePlayer = 0;  // who lived??
+  p1alive = 1;  // player is alive
+  p2alive = 1;  // player is alive
+  p3alive = 1;  // player is alive
+  p4alive = 1;  // player is alive
+  gameEnded = 0; // the game is not over
+  lcd.begin(16, 2);
+  //lcd.clear();
+  //lcd.setCursor(0, 0);
+  lcd.print("New Game!");
+  lcd.setCursor(0, 1);
+  lcd.print("Click for next");
+  myDFPlayer.playMp3Folder(7);  //Play spin mp3
+ }
+
+// reset gamestarted and gamemode back to 0 so we get the main menu again
+void resetGame(){
+  Serial.print("resetting game");  
+  gameStarted = 0;
+  gameMode = 0;
+}
+
+
+// This will sit around waiting for a button to be pressed
+// Either first player or the start button
+// If first player, start next game
+// If start button, reset back to beginning (maybe confirm?)
+void waitOnAnyButtonToContinue(){
+  while(1){
+    check_buttons();
+    action();
+    if (startButtonPressed == 1) {
+      startButtonPressed = 0;  // unpress it again for the future
+      nextGame();
+      resetGame();
+      return;
+    }
+    if (p1ButtonPressed == 1) {
+      p1ButtonPressed = 0;  // unpress it again for the future
+      nextGame();
+      return;
+    }
+  }
+}
