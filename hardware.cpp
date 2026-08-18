@@ -206,19 +206,26 @@ void hardwareBegin() {
   lcd.clear();
 
   AUDIO_PORT.begin(9600);
-  audioReady = dfPlayer.begin(AUDIO_PORT);
+
+  // isACK = false is load-bearing, not a tidy-up.
+  //
+  // With ACK enabled — the library's default — every command goes through
+  //     while (_isSending) { waitAvailable(); }
+  // and waitAvailable() only gives up after a 500 ms timeout. On the current
+  // wiring the module's replies can never arrive (the SoftwareSerial RX pin
+  // cannot receive on a Mega; see config.h), so that timeout is paid in full on
+  // every single sound. Nothing else runs during it: buttonsPoll() is not
+  // called, so a player who presses and releases inside those 500 ms has their
+  // press discarded entirely.
+  //
+  // With ACK off the library sends and waits 10 ms, and begin() reports success
+  // on the strength of `!isACK` rather than a reply it will never hear.
+  audioReady = dfPlayer.begin(AUDIO_PORT, /*isACK=*/false, /*doReset=*/true);
+
   if (audioReady) {
     dfPlayer.volume(AUDIO_VOLUME);
-    DBGLN(F("DFPlayer Mini online."));
+    DBGLN(F("DFPlayer Mini online (fire-and-forget, no ACK)."));
   } else {
-    // With AUDIO_USE_HARDWARE_SERIAL 0 this is expected: the SoftwareSerial RX
-    // pin cannot receive on a Mega, so the module's ACK never arrives even
-    // though playback works. See config.h.
-    DBGLN(F("DFPlayer did not answer - check the SD card and wiring."));
-#if !AUDIO_USE_HARDWARE_SERIAL
-    // Send anyway; transmit is unaffected by the RX pin problem.
-    audioReady = true;
-    dfPlayer.volume(AUDIO_VOLUME);
-#endif
+    DBGLN(F("DFPlayer did not start - check the SD card and wiring."));
   }
 }
