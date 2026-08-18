@@ -100,3 +100,16 @@ earlier version that prompted the rewrite.
 - Remember the fastest time ever, in EEPROM so it survives a power cycle
 - A way to reset the scores without pulling the plug
 - Choose how many players are in, so absent stations are not marked dead every round
+
+## Bench simulator
+
+[`simulator/index.html`](simulator/index.html) is the sketch's state machine ported to the
+browser, so the game can be played and the logic checked without flashing the board. Same
+constants, same screens, same rules. Open the file directly — no build step, no server.
+
+Press **1–4** to draw and **space** for the centre button. It shows the current state, the
+steady delay it rolled, and a serial-monitor pane mirroring the debug output.
+
+It is a port, not an emulator: timestamps come from `performance.now()` and the poll runs once
+per animation frame, so reaction times are quantised to about 16 ms where the board resolves
+far finer. There is no DFPlayer, so the countdown is silent.

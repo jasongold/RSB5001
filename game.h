@@ -25,6 +25,10 @@ enum GameMode : uint8_t {
 struct Player {
   bool alive;
   bool fired;
+  // Drew before the bang. Distinct from !alive, which also covers losing
+  // honestly: at the end of a round everyone but the winner is marked dead, so
+  // !alive on its own cannot tell a false start from simply being too slow.
+  bool falseStart;
   unsigned long firedAtUs;  // micros() at the leading edge of the press
   uint8_t score;
   uint8_t place;  // 1 = first to draw; 0 = never drew

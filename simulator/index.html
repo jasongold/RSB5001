@@ -1,0 +1,926 @@
+<title>RSB5001 Bench Simulator</title>
+<style>
+  /* ---- tokens: light ------------------------------------------------- */
+  :root {
+    --bg:        #e9e7df;
+    --bg-2:      #f6f5f0;
+    --ink:       #23241d;
+    --ink-2:     #616355;
+    --ink-3:     #8b8d7e;
+    --rule:      #ceccc0;
+    --accent:    #5d7a33;
+
+    /* the box is a physical object: it looks the same in any room */
+    --panel:     #2c2f28;
+    --panel-2:   #373b32;
+    --panel-3:   #22251f;
+    --silk:      #a8ad98;
+    --silk-dim:  #6b7062;
+
+    --lcd-bg:    #93b168;
+    --lcd-bg-2:  #86a55c;
+    --lcd-ink:   #16240f;
+    --lcd-ghost: rgba(22, 36, 15, .07);
+
+    --blue:      #4aa3ff;
+    --blue-off:  #16354d;
+    --red:       #ff4a3d;
+    --red-off:   #4a1a16;
+
+    --shadow:    0 1px 2px rgba(0,0,0,.10), 0 12px 32px -12px rgba(0,0,0,.30);
+
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    --legend: "Bahnschrift", "Oswald", "Franklin Gothic Medium", "Arial Narrow", "Helvetica Neue", sans-serif;
+    --ui: -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:     #16170f;
+      --bg-2:   #1e2018;
+      --ink:    #e8e7dc;
+      --ink-2:  #9b9d8d;
+      --ink-3:  #6f7264;
+      --rule:   #2e3128;
+      --accent: #9dbd6e;
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 18px 40px -14px rgba(0,0,0,.8);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:     #16170f;
+    --bg-2:   #1e2018;
+    --ink:    #e8e7dc;
+    --ink-2:  #9b9d8d;
+    --ink-3:  #6f7264;
+    --rule:   #2e3128;
+    --accent: #9dbd6e;
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 18px 40px -14px rgba(0,0,0,.8);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 40px 24px 72px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+  }
+
+  /* ---- masthead ------------------------------------------------------ */
+  header { display: flex; flex-direction: column; gap: 8px; }
+
+  .eyebrow {
+    font-family: var(--legend);
+    font-size: 12px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  h1 {
+    font-family: var(--legend);
+    font-weight: 600;
+    font-size: clamp(30px, 5vw, 44px);
+    letter-spacing: -.005em;
+    line-height: 1.05;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--ink-2);
+  }
+
+  /* ---- the box ------------------------------------------------------- */
+  .box {
+    background: linear-gradient(178deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--panel-3);
+    border-radius: 10px;
+    padding: 26px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  .box-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-bottom: 1px solid rgba(255,255,255,.07);
+    padding-bottom: 14px;
+  }
+  .box-name {
+    font-family: var(--legend);
+    font-size: 13px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--silk);
+  }
+  .box-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--silk-dim);
+  }
+
+  /* display row: LCD + status lamp */
+  .display-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 26px;
+    flex-wrap: wrap;
+  }
+
+  .lcd {
+    background: linear-gradient(180deg, var(--lcd-bg), var(--lcd-bg-2));
+    border: 3px solid #14170f;
+    border-radius: 4px;
+    padding: 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    box-shadow: inset 0 0 22px rgba(22,36,15,.22), 0 0 26px -6px rgba(147,177,104,.45);
+  }
+  .lcd-row { display: flex; gap: 2px; }
+  .cell {
+    width: 16px;
+    height: 24px;
+    display: grid;
+    place-items: center;
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--lcd-ink);
+    background: var(--lcd-ghost);
+    border-radius: 1px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .lamp-stack { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .lamp {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: #191c16;
+    border: 2px solid #0f110d;
+    transition: background .09s linear, box-shadow .09s linear;
+  }
+  .lamp-label {
+    font-family: var(--legend);
+    font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--silk-dim);
+  }
+
+  /* stations */
+  .stations {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 14px;
+  }
+  .station {
+    background: var(--panel-3);
+    border: 1px solid rgba(255,255,255,.05);
+    border-radius: 7px;
+    padding: 14px 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 11px;
+  }
+  .station.out { opacity: .5; }
+  .station-name {
+    font-family: var(--legend);
+    font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--silk);
+  }
+  .leds { display: flex; gap: 10px; }
+  .led {
+    width: 15px; height: 15px; border-radius: 50%;
+    border: 1px solid rgba(0,0,0,.55);
+    transition: background .07s linear, box-shadow .07s linear;
+  }
+  .led.blue { background: var(--blue-off); }
+  .led.red  { background: var(--red-off); }
+  .led.blue.on { background: var(--blue); box-shadow: 0 0 13px 2px rgba(74,163,255,.65); }
+  .led.red.on  { background: var(--red);  box-shadow: 0 0 13px 2px rgba(255,74,61,.65); }
+
+  button.btn {
+    font-family: var(--legend);
+    font-size: 14px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: #efeee4;
+    background: #4a4f42;
+    border: 1px solid #5c6252;
+    border-bottom-width: 3px;
+    border-radius: 6px;
+    padding: 11px 0;
+    width: 100%;
+    cursor: pointer;
+    transition: transform .05s linear, background .09s linear;
+  }
+  button.btn:hover { background: #565c4c; }
+  button.btn.down { transform: translateY(2px); border-bottom-width: 1px; background: var(--accent); color: #10130c; }
+  button.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .btn-key {
+    display: block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: rgba(255,255,255,.5);
+    margin-top: 2px;
+  }
+  button.btn.down .btn-key { color: rgba(0,0,0,.5); }
+
+  .start-wrap { display: flex; justify-content: center; }
+  .start-wrap button.btn { max-width: 260px; }
+
+  /* ---- readouts ------------------------------------------------------ */
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .card {
+    background: var(--bg-2);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+  }
+  .card h2 {
+    font-family: var(--legend);
+    font-size: 11px;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0;
+    font-weight: 600;
+  }
+
+  .kv { display: flex; flex-direction: column; gap: 7px; }
+  .kv-row { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .kv-key { font-size: 13px; color: var(--ink-2); }
+  .kv-val {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+  .state-pill {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 3px;
+    background: var(--accent);
+    color: var(--bg-2);
+    font-weight: 600;
+  }
+
+  .log {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.65;
+    height: 190px;
+    overflow-y: auto;
+    background: var(--panel-3);
+    color: #b6bda6;
+    border-radius: 5px;
+    padding: 10px 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .log .t { color: #6b7062; }
+
+  ul.notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
+  ul.notes li { color: var(--ink-2); font-size: 13.5px; }
+  ul.notes code, p code {
+    font-family: var(--mono);
+    font-size: .88em;
+    background: rgba(128,128,128,.14);
+    padding: .5px 4px;
+    border-radius: 3px;
+    color: var(--ink);
+  }
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 18px;
+    color: var(--ink-3);
+    font-size: 13px;
+  }
+  footer a { color: var(--accent); }
+
+  @media (max-width: 720px) {
+    .grid2 { grid-template-columns: 1fr; }
+    .stations { grid-template-columns: repeat(2, 1fr); }
+    .cell { width: 13px; height: 21px; font-size: 13px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Arduino Mega &middot; bench simulator</div>
+    <h1>RSB5001 &mdash; Ready Steady Bang</h1>
+    <p class="standfirst">
+      The sketch's state machine, ported line-for-line to the browser so the game can be played
+      without flashing the board. Same constants, same screens, same rules.
+      Press <strong>1&ndash;4</strong> to draw, <strong>space</strong> for the centre button.
+    </p>
+  </header>
+
+  <div class="box">
+    <div class="box-head">
+      <div class="box-name">RSB5001</div>
+      <div class="box-sub" id="modeReadout">Multiplayer</div>
+    </div>
+
+    <div class="display-row">
+      <div class="lcd" id="lcd" aria-live="polite" aria-label="LCD display"></div>
+      <div class="lamp-stack">
+        <div class="lamp" id="lamp"></div>
+        <div class="lamp-label">Status</div>
+      </div>
+    </div>
+
+    <div class="stations" id="stations"></div>
+
+    <div class="start-wrap">
+      <button class="btn" id="btnStart" type="button">
+        Start / Select
+        <span class="btn-key">space</span>
+      </button>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Machine state</h2>
+      <div class="kv">
+        <div class="kv-row"><span class="kv-key">Current state</span><span class="state-pill" id="stateName">ST_MENU</span></div>
+        <div class="kv-row"><span class="kv-key">Time in state</span><span class="kv-val" id="elapsed">0 ms</span></div>
+        <div class="kv-row"><span class="kv-key">Steady &rarr; bang delay</span><span class="kv-val" id="steadyDur">&mdash;</span></div>
+        <div class="kv-row"><span class="kv-key">Opponent draw</span><span class="kv-val" id="botVal">&mdash;</span></div>
+        <div class="kv-row"><span class="kv-key">Last reaction</span><span class="kv-val" id="lastReaction">&mdash;</span></div>
+        <div class="kv-row"><span class="kv-key">Fastest this session</span><span class="kv-val" id="fastest">&mdash;</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Serial monitor &middot; 115200 baud</h2>
+      <div class="log" id="log" aria-live="off"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Where the simulation differs from the board</h2>
+    <ul class="notes">
+      <li>Timings, screens and rules are taken straight from <code>config.h</code> and the sketch &mdash;
+        including the 800&ndash;4000&nbsp;ms steady delay, the 600&nbsp;ms window held open to rank
+        2nd&ndash;4th, and the 50&nbsp;ms per-button lockout.</li>
+      <li>Presses register on the leading edge here too, but a keyboard has no contact bounce,
+        so the lockout never has anything to swallow.</li>
+      <li>Timestamps come from <code>performance.now()</code> rather than <code>micros()</code>, and the
+        poll runs once per animation frame instead of once per <code>loop()</code>. Reaction times
+        are therefore quantised to about 16&nbsp;ms &mdash; the board resolves far finer.</li>
+      <li>There is no DFPlayer, so the spoken countdown is silent. On the board that audio command
+        is also the thing that stalls <code>millis()</code> while SoftwareSerial transmits.</li>
+    </ul>
+  </div>
+
+  <footer>
+    Simulates <a href="https://github.com/jasongold/RSB5001">jasongold/RSB5001</a>.
+    Scores reset when the page reloads, same as a power cycle.
+  </footer>
+</div>
+
+<script>
+/* ===================================================================
+   Ported from the sketch. Names kept close to the C++ so the two can
+   be read side by side.
+   =================================================================== */
+
+// ---- config.h ------------------------------------------------------
+const PLAYER_COUNT        = 4;
+const READY_MS            = 1000;
+const STEADY_MIN_MS       = 800;
+const STEADY_MAX_MS       = 4000;
+const BANG_TIMEOUT_MS     = 3000;
+const PLACING_WINDOW_MS   = 600;
+const RESULT_DWELL_MS     = 2500;
+const DEBOUNCE_LOCKOUT_MS = 50;
+
+const BOT = {
+  1: { lo: 380, hi: 560, falseStartPct: 12 }, // easy
+  2: { lo: 260, hi: 380, falseStartPct: 0  }, // normal
+  3: { lo: 180, hi: 260, falseStartPct: 0  }, // hard
+};
+
+// ---- game.h --------------------------------------------------------
+const MODE_MULTI = 0, MODE_SOLO_EASY = 1, MODE_SOLO_NORMAL = 2, MODE_SOLO_HARD = 3, MODE_COUNT = 4;
+const MODE_NAMES = ["Multiplayer", "Solo - Easy", "Solo - Normal", "Solo - Hard"];
+
+const ST_MENU = 0, ST_READY = 1, ST_STEADY = 2, ST_BANG = 3, ST_RESULTS = 4, ST_SCORES = 5;
+const STATE_NAMES = ["ST_MENU", "ST_READY", "ST_STEADY", "ST_BANG", "ST_RESULTS", "ST_SCORES"];
+
+const players = Array.from({ length: PLAYER_COUNT }, () => ({
+  alive: true, fired: false, falseStart: false, firedAt: 0, score: 0, place: 0,
+}));
+
+let currentMode = MODE_MULTI;
+let currentSoloPlayer = 0;
+
+const isSolo      = m => m !== MODE_MULTI;
+const modeName    = m => MODE_NAMES[m];
+const playerInPlay = i => !isSolo(currentMode) || i === currentSoloPlayer;
+
+function roundReset() {
+  players.forEach((p, i) => {
+    p.alive = playerInPlay(i);
+    p.fired = false;
+    p.falseStart = false;
+    p.firedAt = 0;
+    p.place = 0;
+  });
+}
+
+function killPlayer(i) {
+  if (i < 0 || i >= PLAYER_COUNT || !players[i].alive) return;
+  players[i].alive = false;
+}
+
+function winner() {
+  let best = -1;
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    const p = players[i];
+    if (!p.fired || !p.alive) continue;
+    if (best < 0 || p.firedAt < players[best].firedAt) best = i;
+  }
+  return best;
+}
+
+function recordShot(i, at) {
+  if (players[i].fired) return false;
+  players[i].fired = true;
+  players[i].firedAt = at;
+  return winner() === i;
+}
+
+function winnerReactionMs(bangAt) {
+  const w = winner();
+  return w < 0 ? 0 : Math.round(players[w].firedAt - bangAt);
+}
+
+function assignPlaces() {
+  let nextPlace = 1;
+  for (let pass = 0; pass < PLAYER_COUNT; pass++) {
+    let best = -1;
+    for (let i = 0; i < PLAYER_COUNT; i++) {
+      if (!players[i].fired || players[i].place !== 0) continue;
+      if (best < 0 || players[i].firedAt < players[best].firedAt) best = i;
+    }
+    if (best < 0) break;
+    players[best].place = nextPlace++;
+  }
+}
+
+const awardScores  = () => players.forEach((p, i) => { if (p.alive && playerInPlay(i)) p.score++; });
+const killEveryone = () => players.forEach(p => { p.alive = false; });
+
+function botDrawReactionMs(m) {
+  const cfg = BOT[m];
+  if (cfg.falseStartPct > 0 && Math.random() * 100 < cfg.falseStartPct) return -1;
+  return Math.floor(cfg.lo + Math.random() * (cfg.hi - cfg.lo));
+}
+
+// ---- hardware.cpp: buttons ------------------------------------------
+const BTN_P1 = 0, BTN_START = 4, BUTTON_COUNT = 5;
+
+const buttons = Array.from({ length: BUTTON_COUNT }, () => ({
+  raw: false, lastRaw: false, pending: false, downAt: 0, lastEdge: -DEBOUNCE_LOCKOUT_MS,
+}));
+
+function buttonsPoll(now) {
+  for (const b of buttons) {
+    if (b.raw && !b.lastRaw && (now - b.lastEdge) >= DEBOUNCE_LOCKOUT_MS) {
+      b.pending = true;
+      b.downAt = now;
+      b.lastEdge = now;
+    }
+    b.lastRaw = b.raw;
+  }
+}
+function buttonWentDown(id) {
+  if (!buttons[id].pending) return false;
+  buttons[id].pending = false;
+  return true;
+}
+const buttonDownAt  = id => buttons[id].downAt;
+const buttonsClearAll = () => buttons.forEach(b => { b.pending = false; });
+
+// ---- the LCD --------------------------------------------------------
+const lcdBuf = ["", ""];
+const lcdShow = (l1, l2) => { lcdBuf[0] = l1; lcdBuf[1] = l2; paintLcd(); };
+const lcdLine = (row, text) => { lcdBuf[row] = text; paintLcd(); };
+
+// ===================================================================
+// rsb5001.ino
+// ===================================================================
+
+let state = ST_MENU;
+let stateEnteredMs = 0;
+let bangAt = 0;
+let steadyDurationMs = 0;
+let firstShotMs = 0;
+let haveFirstShot = false;
+let botReactionMs = 0;
+let botResolved = false;
+let botWon = false;
+let fastestMs = null;
+let lastReactionMs = null;
+
+let nowMs = 0;
+const elapsed = () => nowMs - stateEnteredMs;
+
+function showMenu() {
+  lcdShow(modeName(currentMode), "Any button=go");
+  setStatusColor("blue");
+  setAllPlayerLeds(true, true);
+}
+
+function runMenu() {
+  if (buttonWentDown(BTN_START)) {
+    currentMode = (currentMode + 1) % MODE_COUNT;
+    log("mode: " + modeName(currentMode));
+    showMenu();
+  }
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    if (buttonWentDown(i)) {
+      if (isSolo(currentMode)) currentSoloPlayer = i;
+      enter(ST_READY);
+      return;
+    }
+  }
+}
+
+function watchForFalseStart() {
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    if (!buttonWentDown(i)) continue;
+    if (!players[i].alive || !playerInPlay(i)) continue;
+    players[i].falseStart = true;
+    killPlayer(i);
+    setPlayerLeds(i, false, true);
+    lcdLine(1, `P${i + 1} fired early!`);
+    log(`false start: P${i + 1}`);
+  }
+}
+
+function announceWinner(index) {
+  lcdLine(0, `P${index + 1} wins! ${winnerReactionMs(bangAt)}ms`);
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    setPlayerLeds(i, i === index, i !== index && playerInPlay(i));
+  }
+}
+
+function runBang() {
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    if (!buttonWentDown(i)) continue;
+    if (!players[i].alive || !playerInPlay(i)) continue;
+
+    const isWinningShot = recordShot(i, buttonDownAt(i));
+    if (!haveFirstShot) { haveFirstShot = true; firstShotMs = nowMs; }
+    if (isWinningShot) announceWinner(i);
+  }
+
+  if (isSolo(currentMode) && !botResolved && botReactionMs >= 0 && elapsed() >= botReactionMs) {
+    botResolved = true;
+    if (winner() < 0) {
+      botWon = true;
+      if (!haveFirstShot) { haveFirstShot = true; firstShotMs = nowMs; }
+    }
+  }
+
+  if (haveFirstShot && (nowMs - firstShotMs) >= PLACING_WINDOW_MS) { enter(ST_RESULTS); return; }
+  if (elapsed() >= BANG_TIMEOUT_MS) enter(ST_RESULTS);
+}
+
+function showSoloResult() {
+  const me = currentSoloPlayer;
+  let top, bottom;
+  // Order matters: drawing early is checked before anything else, because the
+  // loser of an honest round is also marked dead by the time we get here.
+  if (players[me].falseStart) {
+    top = "You fired early!"; bottom = "Bot wins";
+  } else if (botReactionMs < 0) {
+    top = "Bot fired early!"; bottom = "You win";
+  } else if (botWon || !players[me].fired) {
+    top = `Bot wins  ${botReactionMs}ms`; bottom = "Too slow!";
+  } else {
+    top = `You win!  ${winnerReactionMs(bangAt)}ms`; bottom = `Bot was ${botReactionMs}ms`;
+  }
+  lcdShow(top, bottom);
+}
+
+function showMultiResult() {
+  const w = winner();
+  if (w < 0) { lcdShow("Everyone dies!", "Nobody drew"); return; }
+
+  let bottom = "";
+  for (let place = 1; place <= PLAYER_COUNT; place++) {
+    for (let i = 0; i < PLAYER_COUNT; i++) {
+      if (players[i].place !== place || bottom.length + 3 >= 17) continue;
+      if (bottom.length > 0) bottom += ">";
+      bottom += "P" + (i + 1);
+    }
+  }
+  lcdShow(`P${w + 1} wins! ${winnerReactionMs(bangAt)}ms`, bottom);
+}
+
+function enterResults() {
+  const w = winner();
+
+  if (isSolo(currentMode)) {
+    if (botWon || (botReactionMs >= 0 && w < 0)) killPlayer(currentSoloPlayer);
+  } else if (w >= 0) {
+    for (let i = 0; i < PLAYER_COUNT; i++) if (i !== w) killPlayer(i);
+  } else {
+    killEveryone();
+  }
+
+  if (w >= 0) {
+    lastReactionMs = winnerReactionMs(bangAt);
+    if (fastestMs === null || lastReactionMs < fastestMs) fastestMs = lastReactionMs;
+    log(`winner P${w + 1} at ${lastReactionMs}ms`);
+  } else {
+    log("nobody drew");
+  }
+
+  assignPlaces();
+  awardScores();
+  showAliveLeds();
+  setStatusColor(w >= 0 ? "green" : "red");
+
+  isSolo(currentMode) ? showSoloResult() : showMultiResult();
+}
+
+function showScores() {
+  const pad = n => String(n).padStart(2, " ");
+  lcdShow("P1 P2 P3 P4", players.map(p => pad(p.score)).join(" "));
+}
+
+function enter(next) {
+  state = next;
+  stateEnteredMs = nowMs;
+
+  switch (next) {
+    case ST_MENU:
+      showMenu();
+      break;
+
+    case ST_READY:
+      buttonsClearAll();
+      roundReset();
+      haveFirstShot = false;
+      botResolved = false;
+      botWon = false;
+      botReactionMs = 0;
+      setAllPlayerLeds(false, false);
+      setStatusColor("green");
+      lcdShow("Ready", "");
+      log("--- round start: " + modeName(currentMode));
+      break;
+
+    case ST_STEADY:
+      steadyDurationMs = Math.floor(STEADY_MIN_MS + Math.random() * (STEADY_MAX_MS - STEADY_MIN_MS));
+      setStatusColor("yellow");
+      lcdShow("Steady", "");
+      log("steady for " + steadyDurationMs);
+      break;
+
+    case ST_BANG:
+      setStatusColor("red");
+      lcdShow("Bang!", "");
+      if (isSolo(currentMode)) {
+        botReactionMs = botDrawReactionMs(currentMode);
+        log("bot will draw at " + (botReactionMs < 0 ? "(false start)" : botReactionMs + "ms"));
+      }
+      bangAt = nowMs;
+      stateEnteredMs = nowMs;
+      break;
+
+    case ST_RESULTS:
+      enterResults();
+      break;
+
+    case ST_SCORES:
+      buttonsClearAll();
+      showScores();
+      break;
+  }
+  paintReadouts();
+}
+
+function loop() {
+  buttonsPoll(nowMs);
+
+  switch (state) {
+    case ST_MENU:
+      runMenu();
+      break;
+    case ST_READY:
+      watchForFalseStart();
+      if (elapsed() >= READY_MS) enter(ST_STEADY);
+      break;
+    case ST_STEADY:
+      watchForFalseStart();
+      if (elapsed() >= steadyDurationMs) enter(ST_BANG);
+      break;
+    case ST_BANG:
+      runBang();
+      break;
+    case ST_RESULTS:
+      if (elapsed() >= RESULT_DWELL_MS) enter(ST_SCORES);
+      break;
+    case ST_SCORES:
+      for (let i = 0; i < BUTTON_COUNT; i++) {
+        if (buttonWentDown(i)) { enter(ST_MENU); return; }
+      }
+      break;
+  }
+}
+
+/* ===================================================================
+   Rendering — the parts a real box does with pins
+   =================================================================== */
+
+const lcdEl   = document.getElementById("lcd");
+const lampEl  = document.getElementById("lamp");
+const logEl   = document.getElementById("log");
+const stationsEl = document.getElementById("stations");
+
+const cells = [];
+for (let row = 0; row < 2; row++) {
+  const rowEl = document.createElement("div");
+  rowEl.className = "lcd-row";
+  const rowCells = [];
+  for (let col = 0; col < 16; col++) {
+    const c = document.createElement("div");
+    c.className = "cell";
+    rowEl.appendChild(c);
+    rowCells.push(c);
+  }
+  lcdEl.appendChild(rowEl);
+  cells.push(rowCells);
+}
+
+function paintLcd() {
+  for (let row = 0; row < 2; row++) {
+    const text = (lcdBuf[row] || "").slice(0, 16);
+    for (let col = 0; col < 16; col++) {
+      const ch = text[col] ?? " ";
+      const cell = cells[row][col];
+      if (cell.textContent !== ch) cell.textContent = ch;
+    }
+  }
+}
+
+const LAMP = {
+  off:    ["#191c16", "none"],
+  blue:   ["#3d7dff", "0 0 20px 4px rgba(61,125,255,.6)"],
+  green:  ["#41d15e", "0 0 20px 4px rgba(65,209,94,.6)"],
+  yellow: ["#e8c33a", "0 0 20px 4px rgba(232,195,58,.6)"],
+  red:    ["#ff3b2f", "0 0 20px 4px rgba(255,59,47,.6)"],
+};
+function setStatusColor(name) {
+  const [bg, glow] = LAMP[name] || LAMP.off;
+  lampEl.style.background = bg;
+  lampEl.style.boxShadow = glow;
+}
+
+const stationEls = [];
+for (let i = 0; i < PLAYER_COUNT; i++) {
+  const el = document.createElement("div");
+  el.className = "station";
+  el.innerHTML =
+    `<div class="station-name">Player ${i + 1}</div>` +
+    `<div class="leds"><span class="led blue"></span><span class="led red"></span></div>` +
+    `<button class="btn" type="button" data-btn="${i}">Draw<span class="btn-key">${i + 1}</span></button>`;
+  stationsEl.appendChild(el);
+  stationEls.push({
+    root: el,
+    blue: el.querySelector(".led.blue"),
+    red:  el.querySelector(".led.red"),
+    btn:  el.querySelector("button"),
+  });
+}
+
+function setPlayerLeds(i, blue, red) {
+  stationEls[i].blue.classList.toggle("on", blue);
+  stationEls[i].red.classList.toggle("on", red);
+}
+function setAllPlayerLeds(blue, red) {
+  for (let i = 0; i < PLAYER_COUNT; i++) setPlayerLeds(i, blue, red);
+}
+function showAliveLeds() {
+  for (let i = 0; i < PLAYER_COUNT; i++) setPlayerLeds(i, players[i].alive, !players[i].alive);
+}
+
+function log(msg) {
+  const line = document.createElement("div");
+  line.innerHTML = `<span class="t">${String(Math.round(nowMs)).padStart(6, " ")}</span>  ` +
+                   msg.replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+  logEl.appendChild(line);
+  while (logEl.children.length > 200) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+const stateNameEl  = document.getElementById("stateName");
+const elapsedEl    = document.getElementById("elapsed");
+const steadyDurEl  = document.getElementById("steadyDur");
+const botValEl     = document.getElementById("botVal");
+const lastReactEl  = document.getElementById("lastReaction");
+const fastestEl    = document.getElementById("fastest");
+const modeReadout  = document.getElementById("modeReadout");
+
+function paintReadouts() {
+  stateNameEl.textContent = STATE_NAMES[state];
+  modeReadout.textContent = modeName(currentMode);
+  steadyDurEl.textContent = steadyDurationMs ? steadyDurationMs + " ms" : "—";
+  botValEl.textContent = !isSolo(currentMode) ? "—"
+    : botReactionMs < 0 ? "false start"
+    : botReactionMs ? botReactionMs + " ms" : "—";
+  lastReactEl.textContent = lastReactionMs === null ? "—" : lastReactionMs + " ms";
+  fastestEl.textContent   = fastestMs === null ? "—" : fastestMs + " ms";
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    stationEls[i].root.classList.toggle("out", !players[i].alive && state !== ST_MENU);
+  }
+}
+
+/* ---- input --------------------------------------------------------- */
+
+function press(id, down) {
+  buttons[id].raw = down;
+  const el = id === BTN_START ? document.getElementById("btnStart") : stationEls[id].btn;
+  el.classList.toggle("down", down);
+}
+
+const KEYMAP = { "1": 0, "2": 1, "3": 2, "4": 3, " ": BTN_START };
+
+addEventListener("keydown", e => {
+  const id = KEYMAP[e.key];
+  if (id === undefined || e.repeat) return;
+  e.preventDefault();
+  press(id, true);
+});
+addEventListener("keyup", e => {
+  const id = KEYMAP[e.key];
+  if (id === undefined) return;
+  e.preventDefault();
+  press(id, false);
+});
+
+function wireButton(el, id) {
+  const down = e => { e.preventDefault(); press(id, true); };
+  const up   = e => { e.preventDefault(); press(id, false); };
+  el.addEventListener("pointerdown", down);
+  el.addEventListener("pointerup", up);
+  el.addEventListener("pointerleave", up);
+  el.addEventListener("pointercancel", up);
+}
+stationEls.forEach((s, i) => wireButton(s.btn, i));
+wireButton(document.getElementById("btnStart"), BTN_START);
+
+/* ---- the main loop -------------------------------------------------- */
+
+const t0 = performance.now();
+function frame() {
+  nowMs = performance.now() - t0;
+  loop();
+  elapsedEl.textContent = Math.round(elapsed()) + " ms";
+  requestAnimationFrame(frame);
+}
+
+log("RSB5001 ready");
+enter(ST_MENU);
+paintReadouts();
+requestAnimationFrame(frame);
+</script>

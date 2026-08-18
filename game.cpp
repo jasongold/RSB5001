@@ -34,6 +34,7 @@ void roundReset() {
   for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
     players[i].alive = playerInPlay(i);
     players[i].fired = false;
+    players[i].falseStart = false;
     players[i].firedAtUs = 0;
     players[i].place = 0;
   }

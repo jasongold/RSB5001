@@ -121,6 +121,7 @@ static void watchForFalseStart() {
       continue;
     }
 
+    players[i].falseStart = true;
     killPlayer(i);
     audioPlay(TRACK_MISS);
 
@@ -204,13 +205,15 @@ static void showSoloResult() {
   char top[17], bottom[17];
   const uint8_t me = soloPlayer();
 
-  if (botReactionMs < 0 && players[me].alive) {
+  // Order matters: drawing early is checked before anything else, because the
+  // loser of an honest round is also marked dead by the time we get here.
+  if (players[me].falseStart) {
+    snprintf(top, sizeof(top), "You fired early!");
+    snprintf(bottom, sizeof(bottom), "Bot wins");
+  } else if (botReactionMs < 0) {
     // The machine drew before the bang.
     snprintf(top, sizeof(top), "Bot fired early!");
     snprintf(bottom, sizeof(bottom), "You win");
-  } else if (!players[me].alive) {
-    snprintf(top, sizeof(top), "You fired early!");
-    snprintf(bottom, sizeof(bottom), "Bot wins");
   } else if (botWon || !players[me].fired) {
     snprintf(top, sizeof(top), "Bot wins  %dms", botReactionMs);
     snprintf(bottom, sizeof(bottom), "Too slow!");
