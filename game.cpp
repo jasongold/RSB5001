@@ -133,6 +133,32 @@ void showAliveLeds() {
 }
 
 // ---------------------------------------------------------------------------
+// Recent winners
+// ---------------------------------------------------------------------------
+
+static int8_t winnerHistory[WINNER_HISTORY];
+static uint8_t winnerHistoryLen = 0;
+
+void recordWinner(int8_t index) {
+  if (winnerHistoryLen < WINNER_HISTORY) {
+    winnerHistory[winnerHistoryLen++] = index;
+    return;
+  }
+  // Full, so drop the oldest and append. Eight bytes: shifting them is cheaper
+  // than the head-and-wrap bookkeeping a ring buffer would need.
+  for (uint8_t i = 1; i < WINNER_HISTORY; i++) {
+    winnerHistory[i - 1] = winnerHistory[i];
+  }
+  winnerHistory[WINNER_HISTORY - 1] = index;
+}
+
+uint8_t winnerHistoryCount() { return winnerHistoryLen; }
+
+int8_t winnerHistoryAt(uint8_t i) {
+  return (i < winnerHistoryLen) ? winnerHistory[i] : -1;
+}
+
+// ---------------------------------------------------------------------------
 // Single player
 // ---------------------------------------------------------------------------
 

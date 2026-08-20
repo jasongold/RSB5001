@@ -73,6 +73,15 @@ void assignPlaces();
 // Everyone still alive scores a point.
 void awardScores();
 
+// Who won the last few rounds, oldest first. The scores screen shows this
+// alongside the totals: the totals say who is ahead, the history says who has
+// been winning lately, which is usually the more interesting of the two.
+//
+// -1 means no station won that round — nobody drew, or in solo the machine did.
+void recordWinner(int8_t index);
+uint8_t winnerHistoryCount();
+int8_t winnerHistoryAt(uint8_t i);
+
 // Kill everyone. Used when the bang timeout expires with no valid draw.
 void killEveryone();
 

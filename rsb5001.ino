@@ -29,6 +29,7 @@
 */
 
 #include "config.h"
+#include "cosmetics.h"
 #include "game.h"
 #include "hardware.h"
 
@@ -55,6 +56,40 @@ static bool botWon = false;
 
 static bool seeded = false;
 
+// The results screen runs in beats; see runResults().
+enum ResultPhase : uint8_t {
+  RESULT_PHASE_FLAVOUR,
+  RESULT_PHASE_RACE,
+  RESULT_PHASE_BIGTIME,
+  RESULT_PHASE_PLACINGS
+};
+static ResultPhase resultPhase = RESULT_PHASE_PLACINGS;
+
+// The winning reaction time, kept as text for the big numerals.
+static char bigTime[6] = "";
+static const char* bigTimeText() { return bigTime; }
+
+// Lane labels for the race header: four stations, or you against the machine.
+static const char* raceHeader() {
+  // Two lanes are eight columns each, four lanes are four.
+  return isSolo(mode()) ? "You     Bot" : "P1  P2  P3  P4";
+}
+
+// When each beat gives way to the next. A round with nothing to replay skips
+// straight from the remark to the placings and keeps the timing it always had.
+static unsigned long raceEndsMs() {
+  return RESULT_FLAVOUR_MS + RESULT_RACE_MS;
+}
+static unsigned long bigTimeEndsMs() {
+  return raceEndsMs() + RESULT_BIGTIME_MS;
+}
+static unsigned long resultDwellMs() {
+  if (!raceWorthShowing()) {
+    return RESULT_DWELL_MS;
+  }
+  return bigTimeEndsMs() + RESULT_PLACINGS_MS;
+}
+
 // ---------------------------------------------------------------------------
 
 static void enter(GameState next);
@@ -79,8 +114,10 @@ static void seedRandomOnce() {
 
 static void showMenu() {
   lcdShow(modeName(mode()), "Any button=go");
-  setStatusColor(COLOR_BLUE);
   setAllPlayerLeds(true, true);
+  // Also restarts the idle countdown, so any trip back through the menu puts
+  // the attract chase back to the beginning rather than partway through a sweep.
+  cosmeticsSet(COS_ATTRACT);
 }
 
 static void runMenu() {
@@ -124,9 +161,14 @@ static void watchForFalseStart() {
     players[i].falseStart = true;
     killPlayer(i);
     audioPlay(TRACK_MISS);
+    cosmeticsAlarm();
 
+    // The skull is a western glyph, which is loaded through Ready and Steady.
+    // It must never survive into the results screen: that loads the bar set,
+    // and the character code would stay put while CGRAM changed underneath it.
     char line[17];
-    snprintf(line, sizeof(line), "P%u fired early!", (unsigned)(i + 1));
+    snprintf(line, sizeof(line), "%c P%u fired early", MARK_SKULL,
+             (unsigned)(i + 1));
     lcdLine(1, line);
 
     DBG(F("false start: P"));
@@ -201,61 +243,124 @@ static void runBang() {
 // Results
 // ---------------------------------------------------------------------------
 
-static void showSoloResult() {
-  char top[17], bottom[17];
-  const uint8_t me = soloPlayer();
+// The result screen carries two lines' worth of information in one row: a
+// remark on the winning time first, then the detail it replaces at
+// RESULT_FLAVOUR_MS. Building the two rows separately is what lets the bottom
+// one be rewritten part-way through the dwell.
 
-  // Order matters: drawing early is checked before anything else, because the
-  // loser of an honest round is also marked dead by the time we get here.
-  if (players[me].falseStart) {
-    snprintf(top, sizeof(top), "You fired early!");
-    snprintf(bottom, sizeof(bottom), "Bot wins");
-  } else if (botReactionMs < 0) {
-    // The machine drew before the bang.
-    snprintf(top, sizeof(top), "Bot fired early!");
-    snprintf(bottom, sizeof(bottom), "You win");
-  } else if (botWon || !players[me].fired) {
-    snprintf(top, sizeof(top), "Bot wins  %dms", botReactionMs);
-    snprintf(bottom, sizeof(bottom), "Too slow!");
-  } else {
-    snprintf(top, sizeof(top), "You win!  %ums", winnerReactionMs(bangAtUs));
-    snprintf(bottom, sizeof(bottom), "Bot was %dms", botReactionMs);
-  }
+static void buildResultTop(char* out, uint8_t len) {
+  if (isSolo(mode())) {
+    const uint8_t me = soloPlayer();
 
-  lcdShow(top, bottom);
-}
-
-static void showMultiResult() {
-  const int8_t w = winner();
-
-  if (w < 0) {
-    lcdShow("Everyone dies!", "Nobody drew");
+    // Order matters: drawing early is checked before anything else, because the
+    // loser of an honest round is also marked dead by the time we get here.
+    if (players[me].falseStart) {
+      snprintf(out, len, "You fired early!");
+    } else if (botReactionMs < 0) {
+      snprintf(out, len, "Bot fired early!");
+    } else if (botWon || !players[me].fired) {
+      snprintf(out, len, "Bot wins  %dms", botReactionMs);
+    } else {
+      snprintf(out, len, "You win!  %ums", winnerReactionMs(bangAtUs));
+    }
     return;
   }
 
-  char top[17];
-  snprintf(top, sizeof(top), "P%u wins! %ums", (unsigned)(w + 1),
+  const int8_t w = winner();
+  if (w < 0) {
+    snprintf(out, len, "Everyone dies!");
+    return;
+  }
+  snprintf(out, len, "P%u wins! %ums", (unsigned)(w + 1),
            winnerReactionMs(bangAtUs));
+}
+
+static void buildResultDetail(char* out, uint8_t len) {
+  if (isSolo(mode())) {
+    const uint8_t me = soloPlayer();
+
+    if (players[me].falseStart) {
+      snprintf(out, len, "Bot wins");
+    } else if (botReactionMs < 0) {
+      snprintf(out, len, "You win");
+    } else if (botWon || !players[me].fired) {
+      snprintf(out, len, "Too slow!");
+    } else {
+      snprintf(out, len, "Bot was %dms", botReactionMs);
+    }
+    return;
+  }
+
+  if (winner() < 0) {
+    snprintf(out, len, "Nobody drew");
+    return;
+  }
 
   // "P3>P1>P4>P2" — everyone who drew, fastest first. Four entries is 11
   // characters, so this always fits the 16-column display.
-  char bottom[17] = "";
   uint8_t used = 0;
+  out[0] = '\0';
   for (uint8_t place = 1; place <= PLAYER_COUNT; place++) {
     for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
-      if (players[i].place != place || used + 3 >= (uint8_t)sizeof(bottom)) {
+      if (players[i].place != place || used + 3 >= len) {
         continue;
       }
       if (used > 0) {
-        bottom[used++] = '>';
+        out[used++] = '>';
       }
-      bottom[used++] = 'P';
-      bottom[used++] = (char)('1' + i);
-      bottom[used] = '\0';
+      out[used++] = 'P';
+      out[used++] = (char)('1' + i);
+      out[used] = '\0';
     }
   }
+}
 
-  lcdShow(top, bottom);
+static void showResultDetail() {
+  char detail[17];
+  buildResultDetail(detail, sizeof(detail));
+  lcdLine(1, detail);
+}
+
+// The results screen, beat by beat:
+//
+//   remark  ->  the race  ->  the winning time in big numerals  ->  placings
+//
+// The race and the big time are skipped when there is nothing to show, and any
+// button skips the lot. None of it is timed against a reaction — the round's
+// last press is long past — so the ~19 ms a full write costs is free here.
+static void runResults() {
+  const unsigned long t = elapsed();
+
+  if (resultPhase == RESULT_PHASE_FLAVOUR && t >= RESULT_FLAVOUR_MS) {
+    if (raceWorthShowing()) {
+      resultPhase = RESULT_PHASE_RACE;
+      lcdLoadGlyphs(GLYPHS_BARS);
+      lcdShow(raceHeader(), "");
+      cosmeticsSet(COS_RACE);
+      return;
+    }
+    resultPhase = RESULT_PHASE_PLACINGS;
+    showResultDetail();
+    return;
+  }
+
+  if (resultPhase == RESULT_PHASE_RACE && t >= raceEndsMs()) {
+    resultPhase = RESULT_PHASE_BIGTIME;
+    cosmeticsSet(COS_RESULTS);
+    // GLYPHS_BARS is still loaded and the numerals are built from it, so this
+    // needs no glyph swap.
+    lcdShow("", "");
+    lcdBigNumber(bigTimeText(), 1);
+    return;
+  }
+
+  if (resultPhase == RESULT_PHASE_BIGTIME && t >= bigTimeEndsMs()) {
+    resultPhase = RESULT_PHASE_PLACINGS;
+    char top[17];
+    buildResultTop(top, sizeof(top));
+    lcdShow(top, "");
+    showResultDetail();
+  }
 }
 
 static void enterResults() {
@@ -278,22 +383,121 @@ static void enterResults() {
 
   assignPlaces();
   awardScores();
+  recordWinner(winner());
   showAliveLeds();
-  setStatusColor(w >= 0 ? COLOR_GREEN : COLOR_RED);
 
-  if (isSolo(mode())) {
-    showSoloResult();
+  // The lamp holds the colour that draw earned. With nobody to grade, it just
+  // sits red.
+  if (w >= 0) {
+    cosmeticsSetGrade(winnerReactionMs(bangAtUs));
+    cosmeticsSet(COS_RESULTS);
   } else {
-    showMultiResult();
+    cosmeticsSet(COS_NONE);
+    setStatusColor(COLOR_RED);
   }
+
+  char top[17], bottom[17];
+  buildResultTop(top, sizeof(top));
+
+  // Hand the round's timings to the replay. In solo the machine gets a lane of
+  // its own, so there is always something to race against; in multiplayer each
+  // station gets one and anybody who did not draw sits at 0.
+  unsigned int lanes[PLAYER_COUNT];
+  if (isSolo(mode())) {
+    const uint8_t me = soloPlayer();
+    lanes[0] = (players[me].fired && !players[me].falseStart)
+                   ? (unsigned int)((players[me].firedAtUs - bangAtUs) / 1000UL)
+                   : 0;
+    lanes[1] = botReactionMs > 0 ? (unsigned int)botReactionMs : 0;
+    cosmeticsSetRace(lanes, 2);
+  } else {
+    for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+      lanes[i] = (players[i].fired && !players[i].falseStart)
+                     ? (unsigned int)((players[i].firedAtUs - bangAtUs) / 1000UL)
+                     : 0;
+    }
+    cosmeticsSetRace(lanes, PLAYER_COUNT);
+  }
+
+  // The winning draw earns a remark now and its time in big numerals a couple
+  // of beats later. Everything else — a false start, nobody drawing at all —
+  // goes straight to the detail, which in those rounds is the interesting half.
+  //
+  // winner() is read after the kills above, so a solo player who lost is already
+  // excluded here and cannot be handed a remark for a time they did not win with.
+  bigTime[0] = '\0';
+  if (winner() >= 0) {
+    const unsigned int ms = winnerReactionMs(bangAtUs);
+    snprintf(bigTime, sizeof(bigTime), "%u", ms);
+    resultPhase = RESULT_PHASE_FLAVOUR;
+    flavourFor(ms, bottom, sizeof(bottom));
+  } else {
+    resultPhase = RESULT_PHASE_PLACINGS;
+    buildResultDetail(bottom, sizeof(bottom));
+  }
+
+  lcdShow(top, bottom);
+}
+
+// The scores screen carries two pages and flips between them every
+// SCORES_PAGE_MS. The old single page used eleven of the sixteen columns and
+// never said who was ahead; this says both without needing another button.
+static uint8_t scoresPage = 0;
+
+// Four columns of four. The spare column ahead of each label holds a star for
+// whoever is leading — the one thing the old layout never told you. Ties star
+// everyone level at the top, and a table of all zeroes stars nobody.
+static void showScoreTotals() {
+  uint8_t best = 0;
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    if (players[i].score > best) {
+      best = players[i].score;
+    }
+  }
+
+  char line0[17], line1[17];
+  for (uint8_t i = 0; i < PLAYER_COUNT; i++) {
+    const uint8_t at = (uint8_t)(i * 4);
+    const bool leads = (best > 0 && players[i].score == best);
+
+    line0[at] = leads ? MARK_STAR : ' ';
+    line0[at + 1] = 'P';
+    line0[at + 2] = (char)('1' + i);
+    line0[at + 3] = ' ';
+
+    // Right-aligned in the three columns under the label, so the units digit
+    // always sits under the station number however big the score gets.
+    snprintf(&line1[at], 5, "%3u ", (unsigned)players[i].score);
+  }
+  line0[16] = '\0';
+  line1[16] = '\0';
+
+  lcdShow(line0, line1);
+}
+
+// Who won the last few rounds, oldest on the left. A round no station won shows
+// a dash — nobody drew in time, or in solo the machine got there first.
+static void showScoreHistory() {
+  char line[17];
+  uint8_t used = 0;
+
+  const uint8_t count = winnerHistoryCount();
+  for (uint8_t i = 0; i < count && used + 2 <= 16; i++) {
+    const int8_t w = winnerHistoryAt(i);
+    line[used++] = (w < 0) ? '-' : (char)('1' + w);
+    line[used++] = ' ';
+  }
+  line[used] = '\0';
+
+  lcdShow("Recent winners", line);
 }
 
 static void showScores() {
-  char bottom[17];
-  snprintf(bottom, sizeof(bottom), "%2u %2u %2u %2u", (unsigned)players[0].score,
-           (unsigned)players[1].score, (unsigned)players[2].score,
-           (unsigned)players[3].score);
-  lcdShow("P1 P2 P3 P4", bottom);
+  if (scoresPage == 0) {
+    showScoreTotals();
+  } else {
+    showScoreHistory();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +510,11 @@ static void enter(GameState next) {
 
   switch (next) {
     case ST_MENU:
+#if LCD_ANIMATION
+      // The attract marquee and tumbleweed need these; so does the duel that
+      // starts a moment later in Ready.
+      lcdLoadGlyphs(GLYPHS_WESTERN);
+#endif
       showMenu();
       break;
 
@@ -322,14 +531,17 @@ static void enter(GameState next) {
       botReactionMs = 0;
 
       setAllPlayerLeds(false, false);
-      setStatusColor(COLOR_GREEN);
+      // The blue LEDs light in turn across the fixed READY_MS, so the box is
+      // doing something through the wait rather than sitting dark.
+      cosmeticsSet(COS_READY);
       lcdShow("Ready", "");
       audioPlay(TRACK_READY);
       break;
 
     case ST_STEADY:
       steadyDurationMs = random(STEADY_MIN_MS, STEADY_MAX_MS);
-      setStatusColor(COLOR_YELLOW);
+      // A flat pulse, at a rate that has nothing to do with steadyDurationMs.
+      cosmeticsSet(COS_STEADY);
       lcdShow("Steady", "");
       audioPlay(TRACK_STEADY);
       DBG(F("steady for "));
@@ -337,9 +549,17 @@ static void enter(GameState next) {
       break;
 
     case ST_BANG:
-      setStatusColor(COLOR_RED);
+      // Every station still in the round lights up at the moment of truth: the
+      // Steady pulse left them in whatever half of its cycle it happened to be
+      // in, and this is the unambiguous "go". Anyone already out keeps their red
+      // LED, which is why this is not a blanket setAllPlayerLeds().
+      showAliveLeds();
       lcdShow("Bang!", "");
       audioPlay(TRACK_BANG);
+      // Blinks the screen with the display on/off command — a few hundred
+      // microseconds each, spread across BANG_BLINK_MS steps, and the only
+      // screen work allowed while a reaction is being measured.
+      cosmeticsSet(COS_BANG);
       if (isSolo(mode())) {
         botReactionMs = botDrawReactionMs(mode());
       }
@@ -357,6 +577,14 @@ static void enter(GameState next) {
     case ST_SCORES:
       // Drop presses left over from the round so the scores stay up long enough
       // to read, rather than being skipped by the shot that ended it.
+      cosmeticsSet(COS_NONE);
+      setStatusColor(COLOR_BLUE);
+#if LCD_ANIMATION
+      // The leader star is a western glyph, and the results screen leaves the
+      // bar set loaded behind it.
+      lcdLoadGlyphs(GLYPHS_WESTERN);
+#endif
+      scoresPage = 0;
       buttonsClearAll();
       showScores();
       break;
@@ -375,6 +603,11 @@ void setup() {
 
 void loop() {
   buttonsPoll();
+
+  // Decoration only, and non-blocking: it steps a pattern if one is due and
+  // returns immediately otherwise. Sits ahead of the switch so it still runs on
+  // the passes where a state handler returns early.
+  cosmeticsTick();
 
   switch (state) {
     case ST_MENU:
@@ -400,12 +633,32 @@ void loop() {
       break;
 
     case ST_RESULTS:
-      if (elapsed() >= RESULT_DWELL_MS) {
+      // Any button cuts the celebration short. The show runs to nearly five
+      // seconds with everything in it, which is a long time to stand still if
+      // you already know who won — so patient people get the replay and
+      // impatient people get on with the next round.
+      for (uint8_t i = 0; i < BUTTON_COUNT; i++) {
+        if (buttonWentDown((ButtonId)i)) {
+          enter(ST_SCORES);
+          return;
+        }
+      }
+      runResults();
+      if (elapsed() >= resultDwellMs()) {
         enter(ST_SCORES);
       }
       break;
 
     case ST_SCORES:
+      // Flip between the totals and the recent history. The screen was already
+      // waiting for a button, so both fit without adding one.
+      {
+        const uint8_t page = (uint8_t)((elapsed() / SCORES_PAGE_MS) % 2);
+        if (page != scoresPage) {
+          scoresPage = page;
+          showScores();
+        }
+      }
       // Any button returns to the menu, so whoever is nearest can move things
       // along.
       for (uint8_t i = 0; i < BUTTON_COUNT; i++) {

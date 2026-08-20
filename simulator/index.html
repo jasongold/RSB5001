@@ -157,6 +157,8 @@
   }
   .lcd-row { display: flex; gap: 2px; }
   .cell {
+    /* A glyph wider than the cell would otherwise bleed into its neighbours. */
+    overflow: hidden;
     width: 16px;
     height: 24px;
     display: grid;
@@ -172,10 +174,12 @@
 
   .lamp-stack { display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .lamp {
+    /* A per-frame colour write would fight a long transition and smear the
+       curve, so this is short enough to smooth steps without lagging them. */
     width: 30px; height: 30px; border-radius: 50%;
     background: #191c16;
     border: 2px solid #0f110d;
-    transition: background .09s linear, box-shadow .09s linear;
+    transition: background .02s linear, box-shadow .02s linear;
   }
   .lamp-label {
     font-family: var(--legend);
@@ -344,7 +348,7 @@
     <p class="standfirst">
       The sketch's state machine, ported line-for-line to the browser so the game can be played
       without flashing the board. Same constants, same screens, same rules.
-      Press <strong>1&ndash;4</strong> to draw, <strong>space</strong> for the centre button.
+      Press <strong>1&ndash;4</strong> to draw, <strong>space</strong> for the centre button, and <strong>A</strong> during the bang to make all four stations draw at once &mdash; the only way one person can trigger the four-way replay.
     </p>
   </header>
 
@@ -404,6 +408,13 @@
         are therefore quantised to about 16&nbsp;ms &mdash; the board resolves far finer.</li>
       <li>There is no DFPlayer, so the spoken countdown is silent. On the board that audio command
         is also the thing that stalls <code>millis()</code> while SoftwareSerial transmits.</li>
+      <li>Writing the screen is free here. On the board every <code>lcdShow()</code> resyncs the
+        controller and repaints all 32 cells &mdash; roughly 19&nbsp;ms, blocking, with no
+        <code>buttonsPoll()</code> running. That cost is why the light show is nearly all LEDs, and
+        why the only screen effect during <code>ST_BANG</code> is <code>lcdBlank()</code>, which is a
+        single command byte. None of that shows up in this page.</li>
+      <li>The LEDs are on/off in both, but the board drives plain digital pins with no PWM, so
+        neither can fade &mdash; the glow here is CSS, not brightness.</li>
     </ul>
   </div>
 
@@ -420,6 +431,12 @@
    =================================================================== */
 
 // ---- config.h ------------------------------------------------------
+// Mirrors LCD_ANIMATION in config.h. The board's panel intermittently loses
+// 4-bit nibble sync, and animation writes skip the resync that recovers it, so
+// the real box runs with this off until LCD_EN moves off pin 13. Flip it to 1
+// here to preview what the box will do once that wire is moved.
+const LCD_ANIMATION       = 0;
+
 const PLAYER_COUNT        = 4;
 const READY_MS            = 1000;
 const STEADY_MIN_MS       = 800;
@@ -428,6 +445,39 @@ const BANG_TIMEOUT_MS     = 3000;
 const PLACING_WINDOW_MS   = 600;
 const RESULT_DWELL_MS     = 2500;
 const DEBOUNCE_LOCKOUT_MS = 50;
+
+// Cosmetics. None of these may be derived from steadyDurationMs — a pulse that
+// quickens into the bang would give the timing away.
+const ATTRACT_IDLE_MS     = 10000;
+const ATTRACT_STEP_MS     = 110;
+const READY_STEP_MS       = READY_MS / PLAYER_COUNT;
+const STEADY_PULSE_MS     = 220;
+const BANG_BLINK_MS       = 120;
+const BANG_RECOIL_COLS    = 3;
+const MARQUEE_STEP_MS     = 220;
+const TUMBLEWEED_STEP_MS  = 190;
+const DUEL_STEP_MS        = 60;
+const RESULT_BIGTIME_MS   = 1100;
+const RESULT_FLAVOUR_MS   = 1200;
+
+// The lamp.
+const LAMP_STEP_MS        = 20;
+const BREATH_PERIOD_MS    = 3600;
+const HEARTBEAT_MS        = 1000;
+const BANG_FLASH_MS       = 90;
+const BANG_FADE_MS        = 320;
+const RESULT_SWELL_MS     = 2200;
+const ALARM_MS            = 900;
+const ALARM_STROBE_MS     = 70;
+
+// The bar race.
+const RESULT_RACE_MS      = 1700;
+const RACE_STEP_MS        = 60;
+const RESULT_PLACINGS_MS  = 900;
+
+// The scores screen.
+const WINNER_HISTORY      = 8;
+const SCORES_PAGE_MS      = 2500;
 
 const BOT = {
   1: { lo: 380, hi: 560, falseStartPct: 12 }, // easy
@@ -542,6 +592,435 @@ const lcdBuf = ["", ""];
 const lcdShow = (l1, l2) => { lcdBuf[0] = l1; lcdBuf[1] = l2; paintLcd(); };
 const lcdLine = (row, text) => { lcdBuf[row] = text; paintLcd(); };
 
+// The display on/off command. On the board this is a single byte — the one
+// screen effect cheap enough to use while a reaction is being measured.
+let lcdBlanked = false;
+const lcdBlank = (blank) => { if (lcdBlanked === blank) return; lcdBlanked = blank; paintLcd(); };
+
+// Hardware scroll, also a single command byte. Used to make the screen kick at
+// the bang. On the board the HD44780 shifts the whole display; here the paint
+// step just offsets what it draws.
+let lcdScroll = 0;
+const lcdNudge = (right) => { lcdScroll += right ? 1 : -1; paintLcd(); };
+
+// Overwrite a few cells in place. No resync, no full repaint — on the board
+// ~205 us per character against ~19 ms for lcdShow(). This is the write an
+// animation frame uses.
+function lcdPatch(row, col, text) {
+  if (row > 1 || col >= 16) return;
+  const line = (lcdBuf[row] || "").padEnd(16, " ").slice(0, 16);
+  lcdBuf[row] = (line.slice(0, col) + text).slice(0, 16).padEnd(16, " ");
+  paintLcd();
+}
+
+// The eight CGRAM slots, loaded a set at a time. The board stores 5x8 bitmaps;
+// here they map to Unicode, deliberately BMP-only — paintLcd indexes by UTF-16
+// code unit, so an astral-plane emoji would split into broken surrogate halves.
+const GLYPHS_NONE = 0, GLYPHS_WESTERN = 1, GLYPHS_BARS = 2;
+const GLYPH_TABLES = {
+  // Two pistols facing each other, skull, tumbleweed, star.
+  [GLYPHS_WESTERN]: [null, "\u2192", "\u2190", "\u2620", "\u273B", "\u2605"],
+  // Five bar widths, then the two half blocks the big digits are built from.
+  [GLYPHS_BARS]:    [null, "\u258F", "\u258E", "\u258D", "\u258C", "\u2588",
+                     "\u2580", "\u2584"],
+};
+let loadedGlyphs = GLYPHS_NONE;
+function lcdLoadGlyphs(set) {
+  if (!LCD_ANIMATION) return;
+  if (set === loadedGlyphs || set === GLYPHS_NONE) return;
+  loadedGlyphs = set;
+  paintLcd();
+}
+// Slot numbers, matching hardware.h.
+const GLYPH_PISTOL_R = 1, GLYPH_PISTOL_L = 2, GLYPH_SKULL = 3,
+      GLYPH_TUMBLEWEED = 4, GLYPH_STAR = 5;
+// The bar set carries the half blocks the big digits are built from, so the
+// results screen never swaps glyph sets mid-screen.
+const GLYPH_FULL = 5, GLYPH_HALF_UPPER = 6, GLYPH_HALF_LOWER = 7;
+
+// Custom glyphs when animation is on, plain ASCII when it is off - with it off
+// no glyph set is ever loaded, so a glyph code would render as whatever CGRAM
+// happens to be holding.
+const MARK_STAR  = LCD_ANIMATION ? String.fromCharCode(GLYPH_STAR)  : "*";
+const MARK_SKULL = LCD_ANIMATION ? String.fromCharCode(GLYPH_SKULL) : "!";
+const GLYPH_BAR = (width) => String.fromCharCode(width);
+
+// ===================================================================
+// cosmetics.cpp
+// ===================================================================
+//
+// Decoration only. Reads game state, drives the LEDs and the screen, never
+// changes a rule. The Steady pattern runs at a fixed rate on purpose: anything
+// that tracked steadyDurationMs would tell the players when the bang is coming.
+
+const COS_NONE = 0, COS_ATTRACT = 1, COS_READY = 2, COS_STEADY = 3, COS_BANG = 4,
+      COS_RESULTS = 5, COS_RACE = 6;
+const ATTRACT_STEPS = PLAYER_COUNT * 2;
+
+let cosPattern = COS_NONE, cosPatternAt = 0, cosLastStep = 0, cosLastLamp = 0, cosPhase = 0;
+let alarmUntil = 0;
+let gradeBand = 2;
+
+function cosmeticsSet(p) {
+  cosPattern = p;
+  cosPatternAt = nowMs;
+  cosLastStep = nowMs;
+  // Back-dated so the lamp repaints on the very next pass, rather than holding
+  // the previous pattern's colour for LAMP_STEP_MS.
+  cosLastLamp = nowMs - LAMP_STEP_MS;
+  cosPhase = 0;
+  lcdBlank(false);
+}
+
+function cosmeticsAlarm() { alarmUntil = nowMs + ALARM_MS; }
+function cosmeticsSetGrade(ms) { gradeBand = reactionBand(ms); }
+
+function cosDue(stepMs) {
+  if ((nowMs - cosLastStep) < stepMs) return false;
+  cosLastStep = nowMs;
+  return true;
+}
+const patternElapsed = () => nowMs - cosPatternAt;
+
+// ---- colour ---------------------------------------------------------
+
+const scale = (c, level) => Math.round((c * level) / 255);
+const setScaled = (r, g, b, level) =>
+  setStatusRgb(scale(r, level), scale(g, level), scale(b, level));
+const setBlend = (a, b, mix) =>
+  setStatusRgb(...[0, 1, 2].map(i => Math.round((a[i] * (255 - mix) + b[i] * mix) / 255)));
+
+// A triangle wave, squared so the ends ease rather than corner. Linear
+// brightness ramps read as abrupt to the eye; this is the cheap fix.
+function breathLevel(elapsedMs, periodMs) {
+  const pos = ((elapsedMs % periodMs) * 255) / periodMs;
+  const tri = pos < 128 ? pos * 2 : (255 - pos) * 2;
+  return Math.round((tri * tri) / 255);
+}
+
+// Fastest first: violet, blue, green, amber, orange, red.
+const GRADE_RGB = [
+  [160, 60, 255], [40, 120, 255], [40, 220, 90],
+  [240, 200, 40], [255, 110, 20], [220, 30, 20],
+];
+// One per mode, so the box says which it is in from across the room.
+const MODE_RGB = [
+  [40, 90, 255],   // Multiplayer - deep blue
+  [40, 220, 90],   // Easy        - green
+  [255, 150, 20],  // Normal      - amber
+  [230, 30, 25],   // Hard        - red
+];
+
+// ---- the lamp patterns ----------------------------------------------
+
+// A false start outranks every pattern: strobe hard red so the whole table sees
+// who it was.
+function lampAlarm() {
+  if (nowMs >= alarmUntil) return false;
+  const on = Math.floor(nowMs / ALARM_STROBE_MS) % 2 === 0;
+  setStatusRgb(on ? 255 : 40, 0, 0);
+  return true;
+}
+
+function lampAttract() {
+  if (patternElapsed() < ATTRACT_IDLE_MS) {
+    const [r, g, b] = MODE_RGB[currentMode];
+    const level = breathLevel(patternElapsed(), BREATH_PERIOD_MS);
+    setScaled(r, g, b, Math.round(40 + (level * 215) / 255));
+    return;
+  }
+  // Left alone long enough: firelight. The brightness stumbling about is what
+  // makes it read as a flame rather than a fade.
+  setScaled(255, 110, 20, 150 + Math.floor(Math.random() * 106));
+}
+
+function lampReady() {
+  // Charging green to white across READY_MS. Fair game to ramp: READY_MS is
+  // fixed and every player already knows how long Ready lasts.
+  const t = Math.min(patternElapsed(), READY_MS);
+  setBlend([40, 220, 90], [255, 255, 255], Math.round((t * 255) / READY_MS));
+}
+
+function lampSteady() {
+  // A heartbeat at a flat HEARTBEAT_MS. Two thumps and a rest, the same every
+  // cycle - it must never speed up, because that would count down to the bang.
+  const t = patternElapsed() % HEARTBEAT_MS;
+  let level = 30;
+  if (t < 110) level = 255;
+  else if (t >= 200 && t < 290) level = 190;
+  setScaled(255, 60, 30, level);
+}
+
+function lampBang() {
+  let t = patternElapsed();
+  if (t < BANG_FLASH_MS) { setStatusRgb(255, 255, 255); return; }
+  t = Math.min(t - BANG_FLASH_MS, BANG_FADE_MS);
+  setBlend([255, 255, 255], [255, 40, 10], Math.round((t * 255) / BANG_FADE_MS));
+}
+
+function lampResults() {
+  // Holding the colour that draw earned, with a slow swell so it does not look
+  // like the box has frozen.
+  const [r, g, b] = GRADE_RGB[gradeBand];
+  const level = breathLevel(patternElapsed(), RESULT_SWELL_MS);
+  setScaled(r, g, b, Math.round(150 + (level * 105) / 255));
+}
+
+function tickLamp() {
+  if ((nowMs - cosLastLamp) < LAMP_STEP_MS) return;
+  cosLastLamp = nowMs;
+  if (lampAlarm()) return;
+  switch (cosPattern) {
+    case COS_ATTRACT: lampAttract(); break;
+    case COS_READY:   lampReady();   break;
+    case COS_STEADY:  lampSteady();  break;
+    case COS_BANG:    lampBang();    break;
+    case COS_RESULTS:
+    case COS_RACE:    lampResults(); break;
+  }
+}
+
+// The bang: what the screen does, one row per step. {columns shifted, blanked}
+//
+// The first version blanked and kicked on the same step, so the recoil happened
+// while the display was dark and nobody ever saw it. The kick now gets a step of
+// its own, lit, before the blinking starts.
+const BANG_SEQ = [
+  [BANG_RECOIL_COLS, 1],  // kicked sideways, lit - the recoil you actually see
+  [0, 1],                 // and back
+  [0, 0],                 // blink
+  [0, 1],
+  [0, 0],
+  [0, 1],
+];
+let bangShift = 0;
+
+function tickBang() {
+  if (!LCD_ANIMATION) return;
+  if (cosPhase >= BANG_SEQ.length || !cosDue(BANG_BLINK_MS)) return;
+  const [wantShift, lit] = BANG_SEQ[cosPhase];
+  while (bangShift < wantShift) { lcdNudge(true); bangShift++; }
+  while (bangShift > wantShift) { lcdNudge(false); bangShift--; }
+  lcdBlank(!lit);
+  cosPhase++;
+}
+
+// ---- attract: a marquee and a tumbleweed ----------------------------
+
+// The star is a custom glyph, so this only reads correctly with the western set.
+const MARQUEE = String.fromCharCode(GLYPH_STAR) + " RSB5001 " +
+                String.fromCharCode(GLYPH_STAR) + " FASTEST DRAW IN THE WEST ";
+let marqueePos = 0, weedPos = 0;
+let lastMarquee = 0, lastWeed = 0, lastDuel = 0;
+
+function tickMarquee() {
+  if (!LCD_ANIMATION) return;
+  if ((nowMs - lastMarquee) < MARQUEE_STEP_MS) return;
+  lastMarquee = nowMs;
+  let w = "";
+  for (let i = 0; i < 16; i++) w += MARQUEE[(marqueePos + i) % MARQUEE.length];
+  lcdPatch(0, 0, w);
+  marqueePos = (marqueePos + 1) % MARQUEE.length;
+}
+
+function tickTumbleweed() {
+  if (!LCD_ANIMATION) return;
+  if ((nowMs - lastWeed) < TUMBLEWEED_STEP_MS) return;
+  lastWeed = nowMs;
+  // Blank where it was, draw where it is now.
+  lcdPatch(1, weedPos, " ");
+  weedPos = (weedPos + 1) % 16;
+  lcdPatch(1, weedPos, String.fromCharCode(GLYPH_TUMBLEWEED));
+}
+
+// ---- ready: the duel ------------------------------------------------
+//
+// Two figures walk in from the edges across the fixed READY_MS. Safe to tie to
+// the clock for the same reason the lamp's charge-up is: READY_MS is fixed and
+// everybody knows it.
+const DUEL_START_GAP = 15, DUEL_END_GAP = 5;
+
+function tickDuel() {
+  if (!LCD_ANIMATION) return;
+  if ((nowMs - lastDuel) < DUEL_STEP_MS) return;
+  lastDuel = nowMs;
+  const t = Math.min(patternElapsed(), READY_MS);
+  const gap = Math.round(DUEL_START_GAP - ((DUEL_START_GAP - DUEL_END_GAP) * t) / READY_MS);
+  const left = Math.floor((15 - gap) / 2), right = left + gap;
+  const row = new Array(16).fill(" ");
+  row[left] = String.fromCharCode(GLYPH_PISTOL_R);
+  row[right] = String.fromCharCode(GLYPH_PISTOL_L);
+  lcdPatch(1, 0, row.join(""));
+}
+
+// ---- big digits -----------------------------------------------------
+//
+// Three columns by four half-rows per digit, drawn with the two half-height
+// blocks in the bar set. Each LCD row carries two of the four grid rows, so a
+// cell is blank, upper, lower or full depending on the pair above and below it.
+const BIG_DIGITS = [
+  [0b111, 0b101, 0b101, 0b111], [0b010, 0b110, 0b010, 0b111],
+  [0b111, 0b001, 0b110, 0b111], [0b111, 0b011, 0b001, 0b111],
+  [0b101, 0b101, 0b111, 0b001], [0b111, 0b100, 0b011, 0b111],
+  [0b111, 0b100, 0b111, 0b111], [0b111, 0b001, 0b010, 0b010],
+  [0b111, 0b101, 0b111, 0b111], [0b111, 0b101, 0b111, 0b001],
+];
+
+const bigCell = (top, bottom) =>
+  String.fromCharCode(top && bottom ? GLYPH_FULL
+                    : top           ? GLYPH_HALF_UPPER
+                    : bottom        ? GLYPH_HALF_LOWER : 32);
+
+function lcdBigNumber(text, col) {
+  if (!LCD_ANIMATION) return;
+  for (let d = 0; d < text.length; d++) {
+    const digit = text.charCodeAt(d) - 48;
+    if (digit < 0 || digit > 9) continue;
+    const at = col + d * 4;
+    if (at + 3 > 16) break;
+    for (let row = 0; row < 2; row++) {
+      const topBits = BIG_DIGITS[digit][row * 2];
+      const botBits = BIG_DIGITS[digit][row * 2 + 1];
+      let cells = "";
+      for (let c = 0; c < 3; c++) {
+        const mask = 1 << (2 - c);
+        cells += bigCell((topBits & mask) !== 0, (botBits & mask) !== 0);
+      }
+      lcdPatch(row, at, cells);
+    }
+  }
+}
+
+// ---- the bar race ---------------------------------------------------
+//
+// The round, replayed. Runners set off together at speeds inversely proportional
+// to their reaction times, so the winner reaches the finish line exactly as the
+// replay ends and everyone else is left short by the margin they actually lost
+// by. You get to see a two-millisecond win.
+//
+// Lanes are however many the caller hands over: four in multiplayer, two in solo
+// where the machine gets a lane of its own.
+
+let raceMs = [], raceLanes = 0, raceFastestMs = 0;
+
+function cosmeticsSetRace(laneMs, lanes) {
+  raceLanes = Math.min(lanes, PLAYER_COUNT);
+  raceMs = laneMs.slice(0, raceLanes);
+  raceFastestMs = 0;
+  for (const ms of raceMs) {
+    if (ms > 0 && (raceFastestMs === 0 || ms < raceFastestMs)) raceFastestMs = ms;
+  }
+}
+
+// One runner still animates: the bar fills at full speed, which reads as "that
+// was the pace to beat".
+function raceWorthShowing() {
+  // Saying no also collapses the results screen back to remark-then-placings,
+  // since the beats key off this.
+  if (!LCD_ANIMATION) return false;
+  return raceMs.filter(ms => ms > 0).length >= 1;
+}
+
+const raceCellsPerLane = () => (raceLanes > 0 ? Math.floor(16 / raceLanes) : 4);
+
+function raceRenderBar(lane, pixels) {
+  const cells = raceCellsPerLane(), barCells = cells - 1;
+  const full = Math.floor(pixels / 5), part = pixels % 5;
+  let out = "";
+  for (let c = 0; c < barCells; c++) {
+    if (c < full) out += GLYPH_BAR(5);
+    else if (c === full && part > 0) out += GLYPH_BAR(part);
+    else out += " ";
+  }
+  lcdPatch(1, lane * cells, out + " ");
+}
+
+function tickRace() {
+  if (!LCD_ANIMATION) return;
+  if (!cosDue(RACE_STEP_MS) || raceFastestMs === 0) return;
+  const barPixels = (raceCellsPerLane() - 1) * 5;
+  const t = Math.min(patternElapsed(), RESULT_RACE_MS);
+  for (let i = 0; i < raceLanes; i++) {
+    if (raceMs[i] === 0) continue;
+    // Distance = speed x time, with speed set by how far off the pace they were.
+    const travel = Math.min(
+      barPixels,
+      Math.floor((barPixels * t * raceFastestMs) / (RESULT_RACE_MS * raceMs[i])));
+    raceRenderBar(i, travel);
+  }
+}
+
+function cosmeticsTick() {
+  tickLamp();
+  switch (cosPattern) {
+    case COS_ATTRACT: {
+      // Hold the menu's static lights first, so the box only starts fidgeting
+      // once it has genuinely been left alone.
+      if ((nowMs - cosPatternAt) < ATTRACT_IDLE_MS) return;
+      // The screen belongs to the attract show now.
+      tickMarquee();
+      tickTumbleweed();
+      if (!cosDue(ATTRACT_STEP_MS)) return;
+      const step = cosPhase % ATTRACT_STEPS;
+      const outbound = step < PLAYER_COUNT;
+      const station = outbound ? step : ATTRACT_STEPS - 1 - step;
+      setAllPlayerLeds(false, false);
+      setPlayerLeds(station, outbound, !outbound);
+      cosPhase++;
+      break;
+    }
+    case COS_READY:
+      tickDuel();
+      if (cosPhase >= PLAYER_COUNT || !cosDue(READY_STEP_MS)) return;
+      // Skip anyone already out: killPlayer() lit their red LED and it stays lit.
+      if (players[cosPhase].alive && playerInPlay(cosPhase)) {
+        setPlayerLeds(cosPhase, true, false);
+      }
+      cosPhase++;
+      break;
+    case COS_STEADY:
+      if (!cosDue(STEADY_PULSE_MS)) return;
+      cosPhase++;
+      // Entering Steady inherits the LEDs the Ready fill left on, so the first
+      // step has to turn them off or the opening pulse is invisible.
+      {
+        const on = (cosPhase & 1) === 0;
+        for (let i = 0; i < PLAYER_COUNT; i++) {
+          if (players[i].alive && playerInPlay(i)) setPlayerLeds(i, on, false);
+        }
+      }
+      break;
+    case COS_BANG:
+      tickBang();
+      break;
+    case COS_RACE:
+      tickRace();
+      break;
+  }
+}
+
+// Remarks, banded by reaction time, two per band so the same draw does not
+// always get the same words back. None is longer than the 16 columns.
+const FLAVOUR_BANDS = [
+  { upTo: 200,      lines: ["Lightning!",       "Inhuman."         ] },
+  { upTo: 280,      lines: ["Sharp shooter",    "Quick draw!"      ] },
+  { upTo: 380,      lines: ["Nice draw",        "Clean hit"        ] },
+  { upTo: 500,      lines: ["Respectable",      "Thatll do"        ] },
+  { upTo: 700,      lines: ["Bit slow...",      "Heavy holster?"   ] },
+  { upTo: Infinity, lines: ["Were you asleep?", "Next week, maybe" ] },
+];
+
+// The remark and the lamp colour both read from this, so a draw called
+// "Lightning!" is always the same violet.
+function reactionBand(ms) {
+  return FLAVOUR_BANDS.findIndex(b => ms < b.upTo);
+}
+
+function flavourFor(ms) {
+  const lines = FLAVOUR_BANDS[reactionBand(ms)].lines;
+  return lines[Math.floor(Math.random() * lines.length)];
+}
+
 // ===================================================================
 // rsb5001.ino
 // ===================================================================
@@ -559,12 +1038,65 @@ let fastestMs = null;
 let lastReactionMs = null;
 
 let nowMs = 0;
+
+// The results screen runs in beats; see runResults().
+const RESULT_PHASE_FLAVOUR = 0, RESULT_PHASE_RACE = 1,
+      RESULT_PHASE_BIGTIME = 2, RESULT_PHASE_PLACINGS = 3;
+let resultPhase = RESULT_PHASE_PLACINGS;
+
+// The winning reaction time, kept as text for the big numerals.
+let bigTime = "";
+
+// Two lanes are eight columns each, four lanes are four.
+const raceHeader = () => (isSolo(currentMode) ? "You     Bot" : "P1  P2  P3  P4");
+
+// When each beat gives way to the next. A round with nothing to replay skips
+// straight from the remark to the placings and keeps the timing it always had.
+const raceEndsMs = () => RESULT_FLAVOUR_MS + RESULT_RACE_MS;
+const bigTimeEndsMs = () => raceEndsMs() + RESULT_BIGTIME_MS;
+const resultDwellMs = () =>
+  raceWorthShowing() ? bigTimeEndsMs() + RESULT_PLACINGS_MS : RESULT_DWELL_MS;
+
+// remark -> the race -> the winning time in big numerals -> placings.
+function runResults() {
+  const t = elapsed();
+
+  if (resultPhase === RESULT_PHASE_FLAVOUR && t >= RESULT_FLAVOUR_MS) {
+    if (raceWorthShowing()) {
+      resultPhase = RESULT_PHASE_RACE;
+      lcdLoadGlyphs(GLYPHS_BARS);
+      lcdShow(raceHeader(), "");
+      cosmeticsSet(COS_RACE);
+      return;
+    }
+    resultPhase = RESULT_PHASE_PLACINGS;
+    lcdLine(1, buildResultDetail());
+    return;
+  }
+
+  if (resultPhase === RESULT_PHASE_RACE && t >= raceEndsMs()) {
+    resultPhase = RESULT_PHASE_BIGTIME;
+    cosmeticsSet(COS_RESULTS);
+    // GLYPHS_BARS is still loaded and the numerals are built from it, so this
+    // needs no glyph swap.
+    lcdShow("", "");
+    lcdBigNumber(bigTime, 1);
+    return;
+  }
+
+  if (resultPhase === RESULT_PHASE_BIGTIME && t >= bigTimeEndsMs()) {
+    resultPhase = RESULT_PHASE_PLACINGS;
+    lcdShow(buildResultTop(), buildResultDetail());
+  }
+}
 const elapsed = () => nowMs - stateEnteredMs;
 
 function showMenu() {
   lcdShow(modeName(currentMode), "Any button=go");
-  setStatusColor("blue");
   setAllPlayerLeds(true, true);
+  // Also restarts the idle countdown, so any trip back through the menu puts
+  // the attract chase back to the beginning rather than partway through a sweep.
+  cosmeticsSet(COS_ATTRACT);
 }
 
 function runMenu() {
@@ -588,8 +1120,11 @@ function watchForFalseStart() {
     if (!players[i].alive || !playerInPlay(i)) continue;
     players[i].falseStart = true;
     killPlayer(i);
+    cosmeticsAlarm();
     setPlayerLeds(i, false, true);
-    lcdLine(1, `P${i + 1} fired early!`);
+    // The skull is a western glyph, loaded through Ready and Steady. It must
+    // never survive into the results screen, which loads the bar set.
+    lcdLine(1, `${MARK_SKULL} P${i + 1} fired early`);
     log(`false start: P${i + 1}`);
   }
 }
@@ -623,26 +1158,36 @@ function runBang() {
   if (elapsed() >= BANG_TIMEOUT_MS) enter(ST_RESULTS);
 }
 
-function showSoloResult() {
-  const me = currentSoloPlayer;
-  let top, bottom;
-  // Order matters: drawing early is checked before anything else, because the
-  // loser of an honest round is also marked dead by the time we get here.
-  if (players[me].falseStart) {
-    top = "You fired early!"; bottom = "Bot wins";
-  } else if (botReactionMs < 0) {
-    top = "Bot fired early!"; bottom = "You win";
-  } else if (botWon || !players[me].fired) {
-    top = `Bot wins  ${botReactionMs}ms`; bottom = "Too slow!";
-  } else {
-    top = `You win!  ${winnerReactionMs(bangAt)}ms`; bottom = `Bot was ${botReactionMs}ms`;
+// The result screen carries two lines' worth of information in one row: a
+// remark on the winning time first, then the detail it gives way to at
+// RESULT_FLAVOUR_MS.
+
+function buildResultTop() {
+  if (isSolo(currentMode)) {
+    const me = currentSoloPlayer;
+    // Order matters: drawing early is checked before anything else, because the
+    // loser of an honest round is also marked dead by the time we get here.
+    if (players[me].falseStart)             return "You fired early!";
+    if (botReactionMs < 0)                  return "Bot fired early!";
+    if (botWon || !players[me].fired)       return `Bot wins  ${botReactionMs}ms`;
+    return `You win!  ${winnerReactionMs(bangAt)}ms`;
   }
-  lcdShow(top, bottom);
+
+  const w = winner();
+  if (w < 0) return "Everyone dies!";
+  return `P${w + 1} wins! ${winnerReactionMs(bangAt)}ms`;
 }
 
-function showMultiResult() {
-  const w = winner();
-  if (w < 0) { lcdShow("Everyone dies!", "Nobody drew"); return; }
+function buildResultDetail() {
+  if (isSolo(currentMode)) {
+    const me = currentSoloPlayer;
+    if (players[me].falseStart)             return "Bot wins";
+    if (botReactionMs < 0)                  return "You win";
+    if (botWon || !players[me].fired)       return "Too slow!";
+    return `Bot was ${botReactionMs}ms`;
+  }
+
+  if (winner() < 0) return "Nobody drew";
 
   let bottom = "";
   for (let place = 1; place <= PLAYER_COUNT; place++) {
@@ -652,7 +1197,7 @@ function showMultiResult() {
       bottom += "P" + (i + 1);
     }
   }
-  lcdShow(`P${w + 1} wins! ${winnerReactionMs(bangAt)}ms`, bottom);
+  return bottom;
 }
 
 function enterResults() {
@@ -676,16 +1221,74 @@ function enterResults() {
 
   assignPlaces();
   awardScores();
+  recordWinner(winner());
   showAliveLeds();
-  setStatusColor(w >= 0 ? "green" : "red");
 
-  isSolo(currentMode) ? showSoloResult() : showMultiResult();
+  // Hand the round's timings to the replay. In solo the machine gets a lane of
+  // its own, so there is always something to race against.
+  if (isSolo(currentMode)) {
+    const me = currentSoloPlayer;
+    const mine = (players[me].fired && !players[me].falseStart)
+      ? Math.round(players[me].firedAt - bangAt) : 0;
+    cosmeticsSetRace([mine, botReactionMs > 0 ? botReactionMs : 0], 2);
+  } else {
+    cosmeticsSetRace(players.map(p =>
+      (p.fired && !p.falseStart) ? Math.round(p.firedAt - bangAt) : 0), PLAYER_COUNT);
+  }
+
+  // The winning draw earns a remark now and its time in big numerals a couple of
+  // beats later.
+  bigTime = "";
+  if (winner() >= 0) {
+    const ms = winnerReactionMs(bangAt);
+    bigTime = String(ms);
+    resultPhase = RESULT_PHASE_FLAVOUR;
+    cosmeticsSetGrade(ms);
+    cosmeticsSet(COS_RESULTS);
+    lcdShow(buildResultTop(), flavourFor(ms));
+  } else {
+    resultPhase = RESULT_PHASE_PLACINGS;
+    cosmeticsSet(COS_NONE);
+    setStatusColor("red");
+    lcdShow(buildResultTop(), buildResultDetail());
+  }
 }
 
-function showScores() {
-  const pad = n => String(n).padStart(2, " ");
-  lcdShow("P1 P2 P3 P4", players.map(p => pad(p.score)).join(" "));
+// Who won the last few rounds, oldest first. -1 means no station won it —
+// nobody drew, or in solo the machine got there first.
+const winnerHistory = [];
+function recordWinner(index) {
+  winnerHistory.push(index);
+  while (winnerHistory.length > WINNER_HISTORY) winnerHistory.shift();
 }
+
+// The scores screen carries two pages and flips between them every
+// SCORES_PAGE_MS. The old single page used eleven of the sixteen columns and
+// never said who was ahead; this says both without needing another button.
+let scoresPage = 0;
+
+// Four columns of four. The spare column ahead of each label holds a star for
+// whoever is leading. Ties star everyone level at the top, and a table of all
+// zeroes stars nobody.
+function showScoreTotals() {
+  const best = Math.max(...players.map(p => p.score));
+  let line0 = "", line1 = "";
+  for (let i = 0; i < PLAYER_COUNT; i++) {
+    const leads = best > 0 && players[i].score === best;
+    line0 += (leads ? MARK_STAR : " ") + "P" + (i + 1) + " ";
+    // Right-aligned in the three columns under the label, so the units digit
+    // always sits under the station number however big the score gets.
+    line1 += String(players[i].score).padStart(3, " ") + " ";
+  }
+  lcdShow(line0, line1);
+}
+
+function showScoreHistory() {
+  lcdShow("Recent winners",
+          winnerHistory.map(w => (w < 0 ? "-" : String(w + 1))).join(" "));
+}
+
+const showScores = () => (scoresPage === 0 ? showScoreTotals() : showScoreHistory());
 
 function enter(next) {
   state = next;
@@ -693,6 +1296,8 @@ function enter(next) {
 
   switch (next) {
     case ST_MENU:
+      // The attract marquee and tumbleweed need these, and so does the duel.
+      lcdLoadGlyphs(GLYPHS_WESTERN);
       showMenu();
       break;
 
@@ -704,21 +1309,26 @@ function enter(next) {
       botWon = false;
       botReactionMs = 0;
       setAllPlayerLeds(false, false);
-      setStatusColor("green");
+      // The blue LEDs light in turn across the fixed READY_MS.
+      cosmeticsSet(COS_READY);
       lcdShow("Ready", "");
       log("--- round start: " + modeName(currentMode));
       break;
 
     case ST_STEADY:
       steadyDurationMs = Math.floor(STEADY_MIN_MS + Math.random() * (STEADY_MAX_MS - STEADY_MIN_MS));
-      setStatusColor("yellow");
+      // A flat pulse, at a rate that has nothing to do with steadyDurationMs.
+      cosmeticsSet(COS_STEADY);
       lcdShow("Steady", "");
       log("steady for " + steadyDurationMs);
       break;
 
     case ST_BANG:
-      setStatusColor("red");
+      // Every station still in the round lights up at the moment of truth.
+      // Anyone already out keeps their red LED, so this is not setAllPlayerLeds.
+      showAliveLeds();
       lcdShow("Bang!", "");
+      cosmeticsSet(COS_BANG);
       if (isSolo(currentMode)) {
         botReactionMs = botDrawReactionMs(currentMode);
         log("bot will draw at " + (botReactionMs < 0 ? "(false start)" : botReactionMs + "ms"));
@@ -732,6 +1342,12 @@ function enter(next) {
       break;
 
     case ST_SCORES:
+      cosmeticsSet(COS_NONE);
+      setStatusColor("blue");
+      // The leader star is a western glyph, and the results screen leaves the
+      // bar set loaded behind it.
+      lcdLoadGlyphs(GLYPHS_WESTERN);
+      scoresPage = 0;
       buttonsClearAll();
       showScores();
       break;
@@ -741,6 +1357,10 @@ function enter(next) {
 
 function loop() {
   buttonsPoll(nowMs);
+
+  // Decoration only, and non-blocking. Sits ahead of the switch so it still
+  // runs on the passes where a state handler returns early.
+  cosmeticsTick();
 
   switch (state) {
     case ST_MENU:
@@ -758,13 +1378,25 @@ function loop() {
       runBang();
       break;
     case ST_RESULTS:
-      if (elapsed() >= RESULT_DWELL_MS) enter(ST_SCORES);
+      // Any button cuts the celebration short. The show runs to nearly five
+      // seconds with everything in it, so patient people get the replay and
+      // impatient people get on with the next round.
+      for (let i = 0; i < BUTTON_COUNT; i++) {
+        if (buttonWentDown(i)) { enter(ST_SCORES); return; }
+      }
+      runResults();
+      if (elapsed() >= resultDwellMs()) enter(ST_SCORES);
       break;
-    case ST_SCORES:
+    case ST_SCORES: {
+      // Flip between the totals and the recent history. The screen was already
+      // waiting for a button, so both fit without adding one.
+      const page = Math.floor(elapsed() / SCORES_PAGE_MS) % 2;
+      if (page !== scoresPage) { scoresPage = page; showScores(); }
       for (let i = 0; i < BUTTON_COUNT; i++) {
         if (buttonWentDown(i)) { enter(ST_MENU); return; }
       }
       break;
+    }
   }
 }
 
@@ -793,27 +1425,47 @@ for (let row = 0; row < 2; row++) {
 }
 
 function paintLcd() {
+  const glyphs = GLYPH_TABLES[loadedGlyphs] || null;
   for (let row = 0; row < 2; row++) {
-    const text = (lcdBuf[row] || "").slice(0, 16);
+    const text = lcdBlanked ? "" : (lcdBuf[row] || "").slice(0, 16);
     for (let col = 0; col < 16; col++) {
-      const ch = text[col] ?? " ";
+      // lcdScroll shifts the whole display, the way the HD44780's own scroll
+      // command does — used for the recoil kick at the bang.
+      const src = col - lcdScroll;
+      let ch = (src >= 0 ? text[src] : undefined) ?? " ";
+      // Character codes 1-5 are CGRAM slots, not letters.
+      const code = ch.charCodeAt(0);
+      if (glyphs && code >= 1 && code <= 7) ch = glyphs[code];
       const cell = cells[row][col];
       if (cell.textContent !== ch) cell.textContent = ch;
     }
   }
 }
 
+// ---- the lamp -------------------------------------------------------
+// On the board this is either analogWrite() on Timer5 pins or software PWM from
+// a Timer5 interrupt, depending on STATUS_LED_HARDWARE_PWM. Here it is just a
+// colour. Note the board's LEDs at the stations are discrete blue and red parts
+// and cannot do this — only the centre lamp is RGB.
+function setStatusRgb(r, g, b) {
+  lampEl.style.background = `rgb(${r},${g},${b})`;
+  const lit = Math.max(r, g, b);
+  lampEl.style.boxShadow = lit < 24
+    ? "none"
+    : `0 0 ${14 + (lit * 12) / 255}px ${2 + (lit * 3) / 255}px rgba(${r},${g},${b},.6)`;
+}
+
 const LAMP = {
-  off:    ["#191c16", "none"],
-  blue:   ["#3d7dff", "0 0 20px 4px rgba(61,125,255,.6)"],
-  green:  ["#41d15e", "0 0 20px 4px rgba(65,209,94,.6)"],
-  yellow: ["#e8c33a", "0 0 20px 4px rgba(232,195,58,.6)"],
-  red:    ["#ff3b2f", "0 0 20px 4px rgba(255,59,47,.6)"],
+  off:    [25, 28, 22],
+  blue:   [61, 125, 255],
+  green:  [65, 209, 94],
+  yellow: [232, 195, 58],
+  red:    [255, 59, 47],
+  white:  [244, 246, 238],
 };
 function setStatusColor(name) {
-  const [bg, glow] = LAMP[name] || LAMP.off;
-  lampEl.style.background = bg;
-  lampEl.style.boxShadow = glow;
+  const [r, g, b] = LAMP[name] || LAMP.off;
+  setStatusRgb(r, g, b);
 }
 
 const stationEls = [];
@@ -886,6 +1538,20 @@ function press(id, down) {
 const KEYMAP = { "1": 0, "2": 1, "3": 2, "4": 3, " ": BTN_START };
 
 addEventListener("keydown", e => {
+  // A: all four stations draw, milliseconds apart. There is no equivalent on the
+  // box - it exists because the bar race needs several people drawing inside the
+  // 600 ms placing window, and one person at a keyboard can never produce that.
+  if (e.key === "a" || e.key === "A") {
+    e.preventDefault();
+    if (state !== ST_BANG) return;
+    for (let i = 0; i < PLAYER_COUNT; i++) {
+      setTimeout(() => {
+        press(i, true);
+        setTimeout(() => press(i, false), 40);
+      }, 30 + i * 45 + Math.random() * 60);
+    }
+    return;
+  }
   const id = KEYMAP[e.key];
   if (id === undefined || e.repeat) return;
   e.preventDefault();

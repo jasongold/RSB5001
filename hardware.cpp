@@ -94,6 +94,72 @@ void buttonsClearAll() {
 // LEDs
 // ---------------------------------------------------------------------------
 
+#if STATUS_LED_HARDWARE_PWM
+
+void setStatusRgb(uint8_t r, uint8_t g, uint8_t b) {
+  analogWrite(STATUS_R, r);
+  analogWrite(STATUS_G, g);
+  analogWrite(STATUS_B, b);
+}
+
+static void statusPwmBegin() {}  // analogWrite() needs no setting up
+
+#else
+
+// Software PWM by bit-angle modulation. See the note in config.h for why this
+// exists and why it is eight interrupts a frame rather than 256.
+//
+// `statusLevel` is written by the main loop and read by the ISR. Each element is
+// a single byte, and AVR byte stores are atomic, so a torn read is impossible
+// and no cli/sei guard is needed — the worst case is one frame showing an old
+// channel value alongside a new one, which is invisible at 100 Hz.
+static volatile uint8_t statusLevel[3] = {0, 0, 0};
+static const uint8_t statusPin[3] = {STATUS_R, STATUS_G, STATUS_B};
+static volatile uint8_t bamPlane = 0;
+
+void setStatusRgb(uint8_t r, uint8_t g, uint8_t b) {
+  statusLevel[0] = r;
+  statusLevel[1] = g;
+  statusLevel[2] = b;
+}
+
+ISR(TIMER5_COMPA_vect) {
+  // Schedule the next plane before touching anything else.
+  //
+  // CTC resets TCNT5 to zero at the compare match, so everything done in here
+  // runs while the counter is already climbing towards the next one. Writing
+  // OCR5A last meant racing three digitalWrite() calls — around 30 counts —
+  // against the shortest plane's 78, and if TCNT5 ever got past the new value
+  // the compare would be missed and the timer would run the whole way round to
+  // 0xFFFF: a 32 ms stall, visible as the lamp hitching. Setting it first costs
+  // nothing and removes the race rather than just making it unlikely.
+  OCR5A = (uint16_t)STATUS_BAM_TICK_COUNTS << bamPlane;
+
+  // Light every channel whose value has this bit set, and hold for 2^plane
+  // ticks. Over a whole frame each channel is lit for exactly its own value out
+  // of 255.
+  const uint8_t mask = (uint8_t)(1u << bamPlane);
+  for (uint8_t i = 0; i < 3; i++) {
+    digitalWrite(statusPin[i], (statusLevel[i] & mask) ? HIGH : LOW);
+  }
+
+  bamPlane = (uint8_t)((bamPlane + 1) % STATUS_BAM_PLANES);
+}
+
+static void statusPwmBegin() {
+  // Timer5, CTC on OCR5A, /8 prescale. No output-compare pins are enabled, so
+  // this drives nothing but the interrupt — pins 44-46 stay ordinary I/O.
+  noInterrupts();
+  TCCR5A = 0;
+  TCCR5B = (1 << WGM52) | (1 << CS51);  // CTC, clk/8
+  TCNT5 = 0;
+  OCR5A = STATUS_BAM_TICK_COUNTS;
+  TIMSK5 = (1 << OCIE5A);
+  interrupts();
+}
+
+#endif  // STATUS_LED_HARDWARE_PWM
+
 void setStatusColor(StatusColor color) {
   bool r = false, g = false, b = false;
 
@@ -109,9 +175,7 @@ void setStatusColor(StatusColor color) {
     default:                                          break;
   }
 
-  digitalWrite(STATUS_R, r ? HIGH : LOW);
-  digitalWrite(STATUS_G, g ? HIGH : LOW);
-  digitalWrite(STATUS_B, b ? HIGH : LOW);
+  setStatusRgb(r ? 255 : 0, g ? 255 : 0, b ? 255 : 0);
 }
 
 void setPlayerLeds(uint8_t index, bool blue, bool red) {
@@ -209,6 +273,106 @@ void lcdShow(const char* line1, const char* line2) {
   lcdRepaint();
 }
 
+void lcdBlank(bool blank) {
+  if (blank) {
+    lcd.noDisplay();
+  } else {
+    lcd.display();
+  }
+}
+
+void lcdNudge(bool right) {
+  if (right) {
+    lcd.scrollDisplayRight();
+  } else {
+    lcd.scrollDisplayLeft();
+  }
+}
+
+void lcdPatch(uint8_t row, uint8_t col, const char* text) {
+  if (row > 1 || col >= 16) {
+    return;
+  }
+
+  // Keep the shadow buffer truthful, so the next full repaint still agrees with
+  // what is actually on the glass.
+  uint8_t i = 0;
+  while (text[i] != '\0' && (col + i) < 16) {
+    lcdBuf[row][col + i] = text[i];
+    i++;
+  }
+  if (i == 0) {
+    return;
+  }
+
+  lcd.setCursor(col, row);
+  for (uint8_t n = 0; n < i; n++) {
+    lcd.write(lcdBuf[row][col + n]);
+  }
+}
+
+// 5x8 bitmaps, one byte per row, low five bits used.
+//
+// The western set is what the menu and the round wear; the bar set is what the
+// results screen wears. Only one can be loaded at a time, which is why no
+// western glyph may ever be left on screen when the results load the bars — the
+// character codes would stay put while CGRAM changed underneath them, and a
+// skull would silently turn into a bar.
+static const uint8_t GLYPHS_WESTERN_DATA[7][8] PROGMEM = {
+    {0x00, 0x00, 0x1C, 0x1F, 0x04, 0x04, 0x00, 0x00},  // pistol, facing right
+    {0x00, 0x00, 0x07, 0x1F, 0x04, 0x04, 0x00, 0x00},  // pistol, facing left
+    {0x0E, 0x1F, 0x15, 0x1F, 0x0E, 0x0E, 0x00, 0x00},  // skull
+    {0x00, 0x0A, 0x15, 0x0E, 0x15, 0x0A, 0x00, 0x00},  // tumbleweed
+    {0x00, 0x04, 0x15, 0x0E, 0x15, 0x04, 0x00, 0x00},  // star
+    {0x00, 0x00, 0x0E, 0x1F, 0x1F, 0x0E, 0x00, 0x00},  // bullet
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // unused
+};
+
+// The bar set carries the race's five widths in slots 1-5, and then the two
+// half-height blocks the big digits are built from in 6 and 7. Sharing one set
+// means the results screen never has to swap glyphs part-way through.
+static const uint8_t GLYPHS_HALF_UPPER[8] PROGMEM = {
+    0x1F, 0x1F, 0x1F, 0x1F, 0x00, 0x00, 0x00, 0x00};
+static const uint8_t GLYPHS_HALF_LOWER[8] PROGMEM = {
+    0x00, 0x00, 0x00, 0x00, 0x1F, 0x1F, 0x1F, 0x1F};
+
+static GlyphSet loadedGlyphs = GLYPHS_NONE;
+
+void lcdLoadGlyphs(GlyphSet set) {
+  if (set == loadedGlyphs || set == GLYPHS_NONE) {
+    return;
+  }
+
+  uint8_t rows[8];
+
+  for (uint8_t slot = 1; slot <= 7; slot++) {
+    if (set == GLYPHS_WESTERN) {
+      for (uint8_t r = 0; r < 8; r++) {
+        rows[r] = pgm_read_byte(&GLYPHS_WESTERN_DATA[slot - 1][r]);
+      }
+    } else if (slot <= 5) {
+      // A bar of `slot` pixels: the same solid stub on every row.
+      const uint8_t bits = (uint8_t)((0x1F << (5 - slot)) & 0x1F);
+      for (uint8_t r = 0; r < 8; r++) {
+        rows[r] = bits;
+      }
+    } else {
+      const uint8_t* src =
+          (slot == 6) ? GLYPHS_HALF_UPPER : GLYPHS_HALF_LOWER;
+      for (uint8_t r = 0; r < 8; r++) {
+        rows[r] = pgm_read_byte(&src[r]);
+      }
+    }
+    lcd.createChar(slot, rows);
+  }
+
+  // createChar leaves the controller addressing CGRAM; anything written after
+  // it would land in the glyph table rather than on the screen. Put the cursor
+  // back into display memory before returning.
+  lcd.setCursor(0, 0);
+  loadedGlyphs = set;
+}
+
 void lcdLine(uint8_t row, const char* text) {
   if (row > 1) {
     return;
@@ -259,6 +423,7 @@ void hardwareBegin() {
   pinMode(STATUS_R, OUTPUT);
   pinMode(STATUS_G, OUTPUT);
   pinMode(STATUS_B, OUTPUT);
+  statusPwmBegin();
   pinMode(BUZZER, OUTPUT);
 
   // LCD contrast in place of a trim pot. See the Timer2 warning in config.h

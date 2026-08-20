@@ -37,6 +37,25 @@
 // starts. Serial1 is a hardware UART and does none of that.
 #define AUDIO_USE_HARDWARE_SERIAL 0
 
+// LCD animation: the marquee, the tumbleweed, the duel, the bar race, the big
+// numerals, the recoil and the bang blink.
+//
+// Set this to 0 if the display garbles. Every write then goes back through
+// lcdResync(), exactly as it did before any of this existed, so a dropped nibble
+// heals on the very next screen change.
+//
+// Why it matters: animation deliberately skips that resync — 205 us a character
+// against 19 ms — which is affordable but removes the safety net. On a panel
+// that drops nibbles there is then nothing to recover it, and the attract screen
+// makes it permanent because it writes continuously and never calls lcdShow().
+//
+// The real cure is moving LCD_EN off pin 13; see the note beside it above. With
+// that wire moved this can go back to 1.
+//
+// None of this touches the LEDs or the centre lamp. They keep their full show
+// either way.
+#define LCD_ANIMATION 0
+
 // 0 = buttons wired to Vcc with external pull-down resistors, HIGH = pressed
 //     (as built).
 // 1 = buttons wired to ground using the AVR's internal pull-ups, LOW = pressed.
@@ -97,14 +116,46 @@
 
 // Centre RGB status LED.
 //
-// These are plain digital pins: the Mega's PWM pins are 2-13 and 44-46 only, so
-// analogWrite() here just writes HIGH for values >= 128 and LOW below. The
-// sketch uses digitalWrite() and a fixed palette to be honest about that. To get
-// real colour blending, move these three wires to 44/45/46 (Timer5) — the pins
-// the 2021 build used.
+// The part itself is a 4-pin common-cathode RGB LED and will make any colour.
+// Whether the Mega can ask it to depends entirely on which pins it is on.
+//
+// 0 = lamp on 40/38/36, the wiring as built in 2023. Those are plain digital
+//     pins — the Mega's PWM pins are 2-13 and 44-46 only — so colour is
+//     generated in software from a Timer5 interrupt. See STATUS_BAM_* below.
+// 1 = lamp moved to 44/45/46 and colour comes from analogWrite(). Three jumper
+//     wires, no interrupt, no CPU cost.
+//
+// Worth knowing: 44/45/46 is where the 2021 builds had it, and they blended
+// properly — reference/RSB500-2021-06-25-0944.ino.txt:299 asks for
+// analogWrite(statusRGB_R, 120) to mix a real yellow. The 2023 rebuild moved the
+// wires to 40/38/36 but kept those analogWrite() calls, and on non-PWM pins
+// every value >= 128 just latches HIGH, so that yellow has been coming out
+// white-ish ever since. Either setting below fixes that; only this one costs
+// nothing to run.
+#define STATUS_LED_HARDWARE_PWM 0
+
+#if STATUS_LED_HARDWARE_PWM
+#define STATUS_R 44
+#define STATUS_G 45
+#define STATUS_B 46
+#else
 #define STATUS_R 40
 #define STATUS_G 38
 #define STATUS_B 36
+
+// Software PWM, by bit-angle modulation rather than a counter: bit-plane p is
+// held for 2^p ticks, so eight interrupts paint a full 8-bit frame instead of
+// the 256 a naive software PWM would need.
+//
+// Timer5 at /8 prescale counts every 0.5 us, so 78 counts is a ~39 us tick. A
+// whole frame is 255 ticks, near enough 10 ms, giving about 100 Hz refresh for
+// roughly 960 interrupts per second.
+//
+// Timer5 is free. Note it is NOT Timer2, which drives analogWrite() on the LCD
+// contrast pin and is the conflict the tone() warning above is about.
+#define STATUS_BAM_TICK_COUNTS 78
+#define STATUS_BAM_PLANES 8
+#endif
 
 // Piezo buzzer. Unused while the DFPlayer is fitted; see the Timer2 warning.
 #define BUZZER 7
@@ -147,6 +198,82 @@
 #define DEBOUNCE_LOCKOUT_MS 50
 
 // ---------------------------------------------------------------------------
+// Cosmetics — the light show
+// ---------------------------------------------------------------------------
+//
+// None of these may be derived from steadyDurationMs. A pulse that quickens as
+// the bang approaches, or a bar that empties into it, hands the players the one
+// thing the game depends on them not knowing.
+
+// How long the menu sits still before the attract chase starts up.
+#define ATTRACT_IDLE_MS 10000
+
+// One step of the attract chase.
+#define ATTRACT_STEP_MS 110
+
+// One step of the Ready fill: the four blue LEDs light in turn across READY_MS.
+#define READY_STEP_MS (READY_MS / PLAYER_COUNT)
+
+// The Steady pulse. Deliberately a fixed rate — see the note above.
+#define STEADY_PULSE_MS 220
+
+// The bang, on screen. Two blinks and a sideways kick, each step this long.
+//
+// The first attempt used three 55 ms blinks and a one-column kick, which was
+// correct, cheap, and effectively invisible - about three video frames. Longer
+// steps and a wider kick cost a few hundred microseconds more in total and are
+// the difference between an effect and a rumour.
+#define BANG_BLINK_MS 120
+#define BANG_RECOIL_COLS 3
+
+// The attract screen.
+#define MARQUEE_STEP_MS 220
+#define TUMBLEWEED_STEP_MS 190
+
+// The duel walking in across Ready.
+#define DUEL_STEP_MS 60
+
+// How long the winning time holds in big numerals, after the race.
+#define RESULT_BIGTIME_MS 1100
+
+// How long the results screen shows its remark before the detail line replaces
+// it. Well past the last button press of the round.
+#define RESULT_FLAVOUR_MS 1200
+
+// How often the lamp recomputes its colour. Fades want to be smooth, not
+// free-running: at 20 ms this is 50 Hz, well past what the eye resolves, and it
+// keeps the work off the vast majority of loop passes.
+#define LAMP_STEP_MS 20
+
+// The menu breath, one full in-and-out.
+#define BREATH_PERIOD_MS 3600
+
+// The Steady heartbeat: two thumps and a rest, this long end to end. FLAT by
+// construction — if this ever varied with steadyDurationMs it would count the
+// players down to the bang.
+#define HEARTBEAT_MS 1000
+
+// The bang: white for this long, then this long fading to a hot red.
+#define BANG_FLASH_MS 90
+#define BANG_FADE_MS 320
+
+// The slow swell on the results screen, so a held colour still looks alive.
+#define RESULT_SWELL_MS 2200
+
+// A false start strobes the lamp red for this long, at this rate.
+#define ALARM_MS 900
+#define ALARM_STROBE_MS 70
+
+// The bar race: how long the replay runs, and how often a bar redraws. Each
+// redraw is a handful of lcdPatch() characters, so 60 ms is both cheap and
+// smooth enough to read as motion.
+#define RESULT_RACE_MS 1700
+#define RACE_STEP_MS 60
+
+// How long the placings hold after the race, before the scores screen.
+#define RESULT_PLACINGS_MS 900
+
+// ---------------------------------------------------------------------------
 // Single player: the machine's reaction time, drawn from [lo, hi) per round
 // ---------------------------------------------------------------------------
 
@@ -180,5 +307,11 @@
 // ---------------------------------------------------------------------------
 
 #define PLAYER_COUNT 4
+
+// How many past rounds the scores screen remembers the winner of.
+#define WINNER_HISTORY 8
+
+// How long each page of the scores screen holds before flipping to the other.
+#define SCORES_PAGE_MS 2500
 
 #endif  // RSB5001_CONFIG_H

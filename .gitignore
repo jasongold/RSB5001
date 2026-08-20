@@ -1,0 +1,3 @@
+# Build output. Produced from the sketch; not worth versioning.
+*.hex
+*.elf
